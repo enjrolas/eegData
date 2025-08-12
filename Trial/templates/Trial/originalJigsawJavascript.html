@@ -1,0 +1,312 @@
+<script type="text/javascript">
+  //based on the excellent kaleidoscope code by Nekodigi (https://gist.github.com/Nekodigi/b72a3f110ecca00d1c8b343fe58bf4e2)
+  
+  let capture;
+  let r; //kaleidoscope radius
+  let angle;
+  let imgAngleOff = 0; //offset angle when uv mapping
+  let angularSpeed = 0;
+  let w;
+  let h;
+  let showStroke = false;
+  let img;
+  let divisions = 0.1;
+  let u, v;
+  let uInc, vInc;
+  let scrambled=true;
+  var puzzle={};
+  var firstRun=true;
+  let images=new Array();
+  var imageIndex=0;
+  let divisionSlider;
+  let pieces=1;
+  let scrambledPieces;
+  var lastValue=0;
+  let font;
+  let audio;
+  var started=false;
+  let delayBetweenImages=0;
+  let ratio;
+  var lastTransition=0;
+  var datasetInput, quantityInput, delayInput, piecesInput, ratioInput, button, subjectIdInput, numImagesInput;
+  var subjectId, numImages;
+  var trialData=[];
+  var trialDict;
+  var trialIndex=0;
+  var trialStartTime;
+  let osc;
+
+  function preload() {
+      font = loadFont('static/fonts/Inconsolata.otf');
+      audio=loadSound('static/audio/20khz.mp3');
+  }
+
+  function setup() {
+      createCanvas(1200, 800, WEBGL);
+      datasetInput=createRadio();
+      datasetInput.position(75,50);
+      datasetInput.option("celebrities", "Celebrities");
+      datasetInput.selected('celebrities');
+      quantityInput=createInput("10");
+      quantityInput.position(75,100);
+      delayInput=createInput("250");
+      delayInput.position(75,150);
+      piecesInput=createInput("500");    
+      piecesInput.position(75,200);
+      ratioInput=createInput("0.14");        
+      ratioInput.position(75,250);
+      subjectIdInput=createInput();
+      subjectIdInput.position(75,300);
+      numImagesInput=createInput("300")
+      numImagesInput.position(75,350);
+      button = createButton('start');
+      button.position(75, 400);
+      button.mousePressed(startTrial);
+      osc=new p5.SinOsc(20000); //20khz oscillator
+      osc.amp(0);  //oscillator is always playing, just on mute
+      osc.start();
+      /*
+       let uri = new URL(window.location.href);
+       let dataset = uri.searchParams.get('dataset');
+       let quantity=Number(uri.searchParams.get('number'));
+       ratio=Number(uri.searchParams.get('ratio'));
+       if(ratio==null)
+       ratio=0.14;
+       delayBetweenImages=Number(uri.searchParams.get('delay'));
+       if(delayBetweenImages==null)
+       delayBetweenImages=5;
+       
+       print("delay: "+delayBetweenImages);
+       scrambledPieces=Number(uri.searchParams.get('pieces'));
+       if(scrambledPieces==null)
+       scrambledPieces=100;
+       print(dataset);
+       if(dataset==null)
+       dataset="";
+       else
+       dataset=dataset+"/";
+       print(quantity)
+       if(quantity==null)
+       quantity=5;
+       //   images.push(loadImage("img/dog.jpg"));
+       //    images.push(loadImage("img/whiteMountains.jpg"));
+       //    images.push(loadImage("img/maggie.jpg"));
+       */
+      
+      angle = (2 * PI) / 20;
+      w = height;
+      h = height;
+      r = width / 2;
+      noStroke();
+      //  stroke(255);
+      textureMode(NORMAL);
+  }
+
+  function startTrial()
+  {
+      trialData=[];
+      trialDict=createStringDict();
+      trialIndex=0;
+      dataset=datasetInput.value();
+      quantity=Number(quantityInput.value());
+      delayBetweenImages=Number(delayInput.value());
+      scrambledPieces=Number(piecesInput.value());
+      ratio=Number(ratioInput.value());
+      subjectId=subjectIdInput.value();
+      numImages=Number(numImagesInput.value());
+      trialDict.set("subjectId", subjectId);
+      trialDict.set("timestamp", month()+"/"+day()+"/"+year()+" "+hour()+":"+minute());
+      trialDict.set("header", "image number, image file index, scrambled?");
+      trialDict.set("dataset", dataset);
+      trialDict.set("delayBetweenImages", delayBetweenImages);
+      trialDict.set("scrambleRatio", ratio);
+      trialDict.set("totalImages", numImages);
+      var startTime=millis();
+      for(var i=1;i<=quantity;i++)    
+      {    
+          let img="/img/"+dataset+"/"+i+".jpg";    
+          print("loading: "+ img);    
+          images.push(loadImage(img));    
+      }    
+      var endTime=millis();    
+      print("finished loading images in "+ (endTime-startTime) + " milliseconds");    
+      //  divisionSlider=createSlider(1, 1000, 500);    
+      //    divisionSlider.position(1000, 20);    
+      randomize();    
+      //hide the user interface
+      userInterface(show=false);
+      started=true;
+      framerate(1/delayBetweenImages);
+      trialStartTime=millis();
+  }
+
+  function userInterface(show)
+  {
+      if(show)    
+      {    
+          datasetInput.show();    
+          quantityInput.show();    
+          delayInput.show();    
+          piecesInput.show();
+	  ratioInput.show();
+          subjectIdInput.show();
+	  numImagesInput.show();
+	  button.show();
+      }
+      else
+      {    
+          datasetInput.hide();    
+          quantityInput.hide();    
+          delayInput.hide();    
+          piecesInput.hide();
+	  ratioInput.hide();
+          subjectIdInput.hide();
+	  numImagesInput.hide();
+	  button.hide();    
+      }
+  }
+
+  function draw() {
+      background(128);
+      textFont(font);
+      
+      //    print(random(0,1));
+      
+      if(started)
+      {
+	  background(0);
+	  if((millis()-lastTransition)>(delayBetweenImages))
+	  {
+	      trialIndex++;
+	      imageIndex=int(random(0,images.length));
+	      let scrambled=(random(0,1)>ratio);
+	      print(trialIndex+" img"+imageIndex+" scrambled: "+scrambled);
+	      trialDict.set(trialIndex+"", (millis()-trialStartTime)+","+imageIndex+","+scrambled);
+	      if(scrambled)
+	      {
+		  pieces=scrambledPieces
+		  divisions=1/sqrt(pieces);
+		  randomize();
+		  audio.play();
+	      }
+	      else{
+		  pieces=1;
+		  divisions=1;
+		  randomize();
+		  audio.play();
+	      }
+	      lastTransition=millis();
+	  }
+	  
+	  if (showStroke)    
+              stroke(255);    
+          else    
+              noStroke();    
+          translate(-width / 2, -height / 2);    
+          for (var y = 0; y <1; y += divisions) {    
+              for (var x = 0; x <1; x += divisions) {    
+                  beginShape(TRIANGLE_STRIP);    
+                  texture(images[imageIndex]);    
+                  if (scrambled) {    
+                      var index=[(int)(x/divisions), (int)(y/divisions)];    
+                      var uv=puzzle[index];    
+                      
+                      vertex(w * x, h * y, uv[0], uv[1]);                 
+                      vertex(w * x, h * (y + divisions), uv[0], uv[1]+divisions);                 
+                      vertex(w * (x+divisions), h * y, uv[0]+divisions, uv[1]);    
+                      vertex(w * (x+divisions), h * (y + divisions), uv[0]+divisions, uv[1]+divisions);                                   
+                      
+                  } else {    
+                      vertex(w * x, h * y, x, y);    
+                      vertex(w * x, h * (y + divisions), x, y + divisions);    
+                      vertex(w * (x+divisions), h * y, x+divisions, y);    
+                      vertex(w * (x+divisions), h * (y + divisions), x+divisions, y + divisions);                 
+                      
+                  }    
+                  endShape(CLOSE);    
+              }    
+          }    
+	  fill(255);
+	  if(trialIndex>numImages)
+	  {
+	      started=false;
+	      print("test complete");
+	      print(trialData);
+	      trialDict.saveJSON("trial -- "+subjectId+".json");
+	  }
+      }
+      else{
+	  resetMatrix();
+	  translate(-width/2, -height/2);
+	  text("dataset: ", 25,50);
+	  text("number of images in dataset: ", 25,100);
+	  text("delay between images (ms): ", 25,150);
+	  text("number of pieces to scramble an object: ", 25,200);
+	  text("ratio of objects to non-objects: ", 25,250);
+	  text("subject ID: ", 25,300);
+	  text("number of total images to show: ", 25,350);
+	  resetMatrix();
+      }
+      /*
+       if(divisionSlider.value()!=lastValue)
+       {
+       divisions=1/sqrt(divisionSlider.value());
+       randomize();
+       lastValue=divisionSlider.value();
+       }
+      */
+      //    divisions=1/sqrt(pieces);
+      
+      
+      //    text('puzzle pieces', divisionSlider.x, divisionSlider.y+35);
+  }
+  
+  function randomize() {
+      puzzle={};
+      
+      for(var x=0;x<1;x+=divisions)
+          for(var y=0;y<1;y+=divisions)
+      {
+	  var index=[(int)(x/divisions),(int)(y/divisions)];
+	  var uv=[int(random(0,sqrt(pieces)))*divisions, int(random(0,sqrt(pieces)))*divisions];
+	  puzzle[index]=uv;
+	  
+      }
+  }
+  
+  function mouseMoved() {
+      angle = (2 * PI) / map(mouseX, 0, width, 1, 40);
+      angularSpeed = map(mouseY - height / 2, 0, height / 2, 0, 0.05);
+  }
+  function keyPressed() {
+      if (key == "s") showStroke = !showStroke;
+      if (key == "r") randomize();
+      if (key==' ')
+      {
+	  started=!started;
+	  print("started: "+started);
+      }
+      if(key=='S')
+          scrambled=!scrambled;
+      if(keyCode==UP_ARROW)
+      {
+	  imageIndex++;
+	  if(imageIndex>=images.length)
+	      imageIndex=0;
+      }
+      if(keyCode==DOWN_ARROW)
+      {
+	  imageIndex--;
+	  if(imageIndex<0)
+	      imageIndex=images.length-1;
+      }
+  }
+  
+  function mouseClicked()
+  {
+      imageIndex++;
+      if(imageIndex>=images.length)
+	  imageIndex=0;
+  }
+
+</script>

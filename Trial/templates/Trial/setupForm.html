@@ -1,0 +1,86 @@
+{% load static %}
+<html>
+  <head>
+    <script type="text/javascript" src="{% static 'js/jquery-3.7.1.min.js' %}"></script>
+    <!-- jQuery Modal -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery-modal/0.9.1/jquery.modal.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/jquery-modal/0.9.1/jquery.modal.min.css" />
+    <script type="text/javascript">
+      $(function(){
+	  $('.modal#newSubject').hide();
+	  $("form#newSubject").on("submit", function(event){
+	      event.preventDefault();
+	      $.post($("form#newSubject").attr("action"),          
+                     {     
+                         "subjectId": $("input#subjectId").val(),    
+                         "notes": $("input#notes").val(),      
+		     },	  
+		     function(data){
+                         $.modal.close();
+			 $("select#subject").append($('<option>',{
+			     value: data['subjectId'],
+			     text: data['subjectId'],
+			 }).attr('selected','selected'));
+		     });
+	  });
+      });
+      function selectChanged(){
+	  if($('#subject').val()=="new")
+	      $("#newSubject").modal();
+      }
+      
+      </script>
+  </head>
+  <body>
+    <form id="trialSetup" action="{% url 'jigsaw' %}" method="get">
+      <div>Subject ID</div>
+      <select name="subjectId" id="subject" onchange="selectChanged();">
+	<option value="0">---</option>
+	<option value="new">New</option>
+	{% for subject in subjects %}
+	<option value="{{ subject.subjectId }}">{{ subject }}</option>
+	{% endfor %}
+	
+      </select>
+      <div>Dataset</div>
+      {% for dataset in datasets %}
+      <input type="radio" name="dataset" id="{{ dataset.name }}" value="{{ dataset.name }}" {% if dataset.default %}checked{% endif %}>
+      <label for="{{ dataset.name }}">{{ dataset.name }}</label>
+      {% endfor %}
+      <div>Trial Style</div>
+      {% for choice in trial.STYLE_CHOICES %}
+      <input type="radio" name="trialStyle" id="{{ choice.0 }}" value="{{ choice.0 }}"{% if choice.0 == trial.KEY %}checked{% endif %}>
+      <label for="{{ choice.0 }}">{{ choice.1 }}</label>
+      {% endfor %}
+      
+      <div>Delay between images(ms)</div>
+      <input type="text" name="delay" value="120">
+      <div>Scrambled Pieces</div>
+      <input type="text" name="pieces" value="500">
+      <div>Ratio of objects to non-objects</div>
+      <input type="text" name="ratio" value="0.14">
+      <div>Number of total images to show</div>      
+      <input type="text" name="totalImages" value="100">
+      <div>Number of calibration flash cycles</div>      
+      <input type="text" name="calibrationFlashes" value="2">
+      <div>period (in ms) of calibration flashes)</div>      
+      <input type="text" name="calibrationPeriod" value="1000">
+      <div>
+	<input type="submit" value="Start Trial">
+      </div>
+    </form>
+    <!-- Modal HTML embedded directly into document -->
+    <div id="newSubject" class="modal">
+      <form id="newSubject" action="{% url 'newSubject' %}" method="post">
+	<div>Subject Id</div>
+	<input type="text" name="newSubjectName" id="subjectId">
+	<div>Notes</div>      
+        <input type="text" name="notes" id="notes">
+        <div>
+	  <input type="submit" value="submit">
+      </form>
+      <a href="#" rel="modal:close">Close</a>
+      </div>
+      
+  </body>
+</html>

@@ -1,0 +1,468 @@
+{% load admin_urls %}
+<script type="text/javascript">
+  //based on the excellent kaleidoscope code by Nekodigi (https://gist.github.com/Nekodigi/b72a3f110ecca00d1c8b343fe58bf4e2)
+  
+  let capture;
+  let r; //kaleidoscope radius
+  let angle;
+  let imgAngleOff = 0; //offset angle when uv mapping
+  let angularSpeed = 0;
+  let w;
+  let h;
+  let showStroke = false;
+  let img;
+  let divisions = 0.1;
+  let u, v;
+  let uInc, vInc;
+  let scrambled=true;
+  var puzzle={};
+  var firstRun=true;
+  let images=new Array();
+  var imageIndex=0;
+  let divisionSlider;
+  let pieces=1;
+  let scrambledPieces;
+  var lastValue=0;
+  let font;
+  let audio;
+  var started=false;
+  let delayBetweenImages=0;
+  let ratio;
+  var lastTransition=0;
+  var datasetInput, quantityInput, delayInput, piecesInput, ratioInput, button, subjectIdInput, numImagesInput;
+  var subjectId, numImages;
+  var trialData=[];
+  var trialDict;
+  var trialIndex=0;
+  var trialStartTime;
+  var timestamp;
+  let osc;
+  var audioDuration=16.66;  //mns
+  var toggleRectW=350, toggleRectH=200;
+  var recognitionPresses=[];
+  var state="setup";
+  var calibrationFlashCount=0;
+  var toggle=false;
+  
+  function preload() {
+      font = loadFont('static/fonts/Inconsolata.otf');
+  }
+  
+  function setup() {
+      createCanvas(windowWidth, windowHeight, WEBGL);
+      /*
+       datasetInput=createRadio();
+       datasetInput.position(75,50);
+       datasetInput.option("celebrities", "Celebrities");
+       datasetInput.selected('celebrities');
+       quantityInput=createInput("10");
+       quantityInput.position(75,100);
+       delayInput=createInput("250");
+       delayInput.position(75,150);
+       piecesInput=createInput("500");    
+       piecesInput.position(75,200);
+       ratioInput=createInput("0.14");        
+       ratioInput.position(75,250);
+       subjectIdInput=createInput();
+       subjectIdInput.position(75,300);
+       numImagesInput=createInput("300")
+       numImagesInput.position(75,350);
+      */
+      button = createButton('start');
+      button.position(width/2, height/2);
+      button.mousePressed(startTrial);
+      
+      /*
+       let uri = new URL(window.location.href);
+       let dataset = uri.searchParams.get('dataset');
+       let quantity=Number(uri.searchParams.get('number'));
+       ratio=Number(uri.searchParams.get('ratio'));
+       if(ratio==null)
+       ratio=0.14;
+       delayBetweenImages=Number(uri.searchParams.get('delay'));
+       if(delayBetweenImages==null)
+       delayBetweenImages=5;
+       
+       print("delay: "+delayBetweenImages);
+       scrambledPieces=Number(uri.searchParams.get('pieces'));
+       if(scrambledPieces==null)
+       scrambledPieces=100;
+       print(dataset);
+       if(dataset==null)
+       dataset="";
+       else
+       dataset=dataset+"/";
+       print(quantity)
+       if(quantity==null)
+       quantity=5;
+       //   images.push(loadImage("img/dog.jpg"));
+       //    images.push(loadImage("img/whiteMountains.jpg"));
+       //    images.push(loadImage("img/maggie.jpg"));
+       */
+      angle = (2 * PI) / 20;
+      //      resizeCanvas();
+      noStroke();
+      //  stroke(255);
+      textureMode(NORMAL);
+  }
+  
+  function resizeTheCanvas()
+  {
+      print("resizing canvas");
+      print("window width: "+windowWidth);
+      print("window height: "+windowHeight);
+      if(windowWidth>windowHeight)
+      {
+	  w=height;
+	  h=height;
+	  r=width/2;
+      }
+      else{
+	  w=width,
+	  h=width;
+	  r=height/2;
+      }
+      print("image size will be "+w+" x "+h);
+  }
+  
+  //is automatically called whenever the window is resized, like if the phone is turned from lanscape to portrait
+  function windowResized() {
+      resizeTheCanvas();
+      resizeCanvas(windowWidth, windowHeight);
+  }
+  
+  function addLeadingZeroIfNeeded(num) {
+      if (String(num).length === 1) {
+          return '0' + String(num);
+      }
+      
+      return String(num);
+  }
+  
+  function startTrial()
+  {
+      trialData=[];
+      trialDict=createStringDict();
+      trialIndex=0;
+      //osc=new p5.SinOsc(20000); //20khz oscillator      
+      //osc.amp(0);  //oscillator is always playing, just on mute      
+      //osc.start();
+      let uri = new URL(window.location.href);
+      dataset=uri.searchParams.get('dataset');
+      delayBetweenImages=Number(uri.searchParams.get('delay'));
+      print("delay: "+(delayBetweenImages+1));
+      scrambledPieces=Number(uri.searchParams.get('pieces'));
+      ratio=Number(uri.searchParams.get('ratio'));
+      subjectId=uri.searchParams.get('subjectId');
+      numImages=Number(uri.searchParams.get('totalImages'));
+      calibrationFlashes=Number(uri.searchParams.get('calibrationFlashes'));
+      calibrationPeriod=Number(uri.searchParams.get('calibrationPeriod'));
+      timestamp=addLeadingZeroIfNeeded(month())+"/"+addLeadingZeroIfNeeded(day())+"/"+addLeadingZeroIfNeeded(year())+" "+addLeadingZeroIfNeeded(hour())+":"+addLeadingZeroIfNeeded(minute());
+      trialDict.set("subjectId", subjectId);
+      trialDict.set("timestamp", timestamp);
+      print(trialDict.get("timestamp"));
+      trialDict.set("header", "image number, image file index, scrambled?");
+      trialDict.set("dataset", dataset);
+      trialDict.set("delayBetweenImages", delayBetweenImages+"");
+      trialDict.set("scrambleRatio", ratio+"");
+      trialDict.set("trialStyle", "{{ trialStyle }}");
+      trialDict.set("totalImages", numImages+"");
+      trialDict.set("calibrationPeriod", calibrationPeriod);
+      trialDict.set("calibrationFlashes", calibrationFlashes);
+      var startTime=millis();
+      print("{{ images }}");
+      {% for image in images %}
+      print("{{ image }}");
+      print("{{ image.image.url }}");
+      images.push(loadImage("{{ image.image.url }}"));
+      {% endfor %}
+      var endTime=millis();    
+      print("finished loading images in "+ (endTime-startTime) + " milliseconds");    
+      //  divisionSlider=createSlider(1, 1000, 500);    
+      //    divisionSlider.position(1000, 20);    
+      randomize();    
+      //hide the user interface
+      resizeTheCanvas();
+      print("starting trial");
+      print(trialDict);
+      userInterface(show=false);
+      state="calibration";
+      lastTransition=0;
+      //frameRate(1000/delayBetweenImages);
+      frameRate(60);
+      trialStartTime=millis();
+  }
+  
+  function userInterface(show)  
+  {  
+      if(show)      
+      {
+	  /*
+           datasetInput.show();
+           quantityInput.show();      
+           delayInput.show();      
+           piecesInput.show();  
+           ratioInput.show();  
+           subjectIdInput.show();  
+           numImagesInput.show();
+	  */
+          button.show();  
+      }  
+      else  
+      {
+	  /*
+           datasetInput.hide();
+           quantityInput.hide();      
+	   delayInput.hide();    
+           piecesInput.hide();
+	   ratioInput.hide();
+           subjectIdInput.hide();
+	   numImagesInput.hide();
+	  */
+	  button.hide();    
+      }
+  }
+  
+  function openNewBackgroundTab(url){
+      /*
+       var is_chrome = navigator.userAgent.toLowerCase().indexOf('chrome') > -1;
+       if(!is_chrome)
+       {
+       var win = window.open(url, '_blank');
+       }
+       else{
+       var a = document.createElement("a");
+       a.href = url;
+       var evt = document.createEvent("MouseEvents");
+       //the tenth parameter of initMouseEvent sets ctrl key
+       evt.initMouseEvent("click", true, true, window, 0, 0, 0, 0, 0,
+       true, false, false, false, 0, null);
+       a.dispatchEvent(evt);
+       }*/
+      print("opening new tab at "+url);
+      window.open(url,'_blank').blur();    
+  }
+  
+  function draw() {
+      background(0);
+      textFont(font);
+      
+      //    print(random(0,1));
+      if(state=="calibration")
+      {
+	  if(calibrationFlashCount<calibrationFlashes)
+	  {
+	      if((millis()-lastTransition)>calibrationPeriod/2)
+	      {
+		  calibrationFlashCount+=0.5;
+		  toggle=!toggle;
+		  lastTransition=millis();
+	      }
+	      if(toggle)
+		  fill(255);          
+              else            
+                  fill(0);
+              rect(width/2-toggleRectW, height/2-toggleRectH, toggleRectW, toggleRectH);
+	      
+	      print("calibration flash count: "+calibrationFlashCount);
+          }
+	  else
+	  {
+	      state="running";
+	  }
+	  
+	  
+      }
+      if(state=="running")
+      {
+	  background(0);
+	  if((millis()-lastTransition)>(delayBetweenImages))
+	  {
+	      trialIndex++;
+	      toggle=!toggle;
+	      imageIndex=int(random(0,images.length));
+	      let scrambled=(random(0,1)>ratio);
+	      print(trialIndex+" img"+imageIndex+" scrambled: "+scrambled);
+	      trialDict.set(trialIndex+"", (millis()-trialStartTime)+","+imageIndex+","+scrambled);
+	      if(scrambled)
+	      {
+		  pieces=scrambledPieces
+		  divisions=1/sqrt(pieces);
+		  randomize();
+		  //		  osc.amp(100);
+	      }
+	      else{
+		  pieces=1;
+		  divisions=1;
+		  randomize();
+		  //		  osc.amp(100);
+	      }
+	      lastTransition=millis();
+	  }
+	  if(millis()-lastTransition>audioDuration)
+	      //	      osc.amp(0);
+	      
+	      if (showStroke)    
+		  stroke(255);    
+          else    
+              noStroke();    
+          translate(-w / 2, -h / 2);    
+          for (var y = 0; y <1; y += divisions) {    
+              for (var x = 0; x <1; x += divisions) {    
+                  beginShape(TRIANGLE_STRIP);    
+                  texture(images[imageIndex]);    
+                  if (scrambled) {    
+                      var index=[(int)(x/divisions), (int)(y/divisions)];    
+                      var uv=puzzle[index];    
+                      
+                      vertex(w * x, h * y, uv[0], uv[1]);                 
+                      vertex(w * x, h * (y + divisions), uv[0], uv[1]+divisions);                 
+                      vertex(w * (x+divisions), h * y, uv[0]+divisions, uv[1]);    
+                      vertex(w * (x+divisions), h * (y + divisions), uv[0]+divisions, uv[1]+divisions);                                   
+                      
+                  } else {    
+                      vertex(w * x, h * y, x, y);    
+                      vertex(w * x, h * (y + divisions), x, y + divisions);    
+                      vertex(w * (x+divisions), h * y, x+divisions, y);    
+                      vertex(w * (x+divisions), h * (y + divisions), x+divisions, y + divisions);                 
+                      
+                  }    
+                  endShape(CLOSE);    
+              }    
+          }
+	  resetMatrix();
+	  if(toggle)
+	      fill(255);              
+          else        
+              fill(0);
+	  
+          rect(width/2-toggleRectW, height/2-toggleRectH, toggleRectW, toggleRectH);
+          
+	  fill(255);
+	  print("trial index: "+trialIndex+" / "+numImages);
+	  if(trialIndex>numImages)
+	  {
+	      //	      osc.amp(0);
+	      state="complete";
+	      print("test complete");
+	      print(trialData);
+	      let payload=new FormData();
+	      payload.append("subjectId",subjectId);
+	      payload.append("timestamp", timestamp);
+	      payload.append("dataset", dataset);
+	      payload.append("delayBetweenImages", delayBetweenImages);
+	      payload.append("scrambleRatio",  ratio);
+	      payload.append("totalImages", numImages);
+	      payload.append("trialDict", JSON.stringify(trialDict));
+	      payload.append("trialStyle", "{{ trialStyle }}");
+	      payload.append("recognitionPresses", JSON.stringify(recognitionPresses));
+	      payload.append("calibrationFlashes", calibrationFlashes);
+	      payload.append("calibrationPeriod", calibrationPeriod);
+	      //                  let payload ={"subjectId": subjectId, "timestamp": timestamp, "dataset": dataset, "delayBetweenImages": delayBetweenImages, "scrambleRatio":  ratio, "totalImages": numImages, "trialDict": trialDict};
+              //{ userId: 1, title: 'p5 Clicked!', body: 'p5.js is very cool.' };
+	      
+	      //	      trialDict.saveJSON("trial -- "+subjectId+".json");
+	      $.ajax({
+		  url:"{% url 'jsonRecorder' %}",
+		  data: payload,
+		  processData:false,
+		  contentType:false,
+		  type: 'POST',
+                  success:function(result){
+		      print("trial data saved successfully");
+		      print(result);
+		      print(result.adminUrl);
+		      openNewBackgroundTab(result.adminUrl);
+		      window.location.replace("{% url 'home' %}");
+		  },
+		  error:function(error){
+		      print("something went wrong");
+		  },
+	      });
+	      
+	  }
+      }
+      else{
+	  resetMatrix();
+	  translate(-width/2, -height/2);
+	  fill(255);
+	  centerText("press the spacebar whenever you see a human face", width/2, 150);
+	  centerText("press the start button when you're ready to begin", width/2, 200);
+	  /*
+	   text("dataset: ", 25,50);
+	   text("number of images in dataset: ", 25,100);
+	   text("delay between images (ms): ", 25,150);
+	   text("number of pieces to scramble an object: ", 25,200);
+	   text("ratio of objects to non-objects: ", 25,250);
+	   text("subject ID: ", 25,300);
+	   text("number of total images to show: ", 25,350);
+	  */
+	  resetMatrix();
+      }
+      /*
+       if(divisionSlider.value()!=lastValue)
+       {
+       divisions=1/sqrt(divisionSlider.value());
+       randomize();
+       lastValue=divisionSlider.value();
+       }
+      */
+      //    divisions=1/sqrt(pieces);
+      
+      
+      //    text('puzzle pieces', divisionSlider.x, divisionSlider.y+35);
+  }
+  function centerText(msg, x, y)
+  {
+      var w=textWidth(msg);
+      text(msg, x-w/2, y);
+  }
+  function randomize() {
+      puzzle={};
+      
+      for(var x=0;x<1;x+=divisions)
+          for(var y=0;y<1;y+=divisions)
+      {
+	  var index=[(int)(x/divisions),(int)(y/divisions)];
+	  var uv=[int(random(0,sqrt(pieces)))*divisions, int(random(0,sqrt(pieces)))*divisions];
+	  puzzle[index]=uv;
+	  
+      }
+  }
+  
+  function mouseMoved() {
+      angle = (2 * PI) / map(mouseX, 0, width, 1, 40);
+      angularSpeed = map(mouseY - height / 2, 0, height / 2, 0, 0.05);
+  }
+  function keyPressed() {
+      if (key == "s") showStroke = !showStroke;
+      if (key == "r") randomize();
+      if (key==' ')
+      {
+	  recognitionPresses.push(millis()-trialStartTime);
+	  print("key pressed: "+ recognitionPresses);
+      }
+      if(key=='S')
+          scrambled=!scrambled;
+      if(keyCode==UP_ARROW)
+      {
+	  imageIndex++;
+	  if(imageIndex>=images.length)
+	      imageIndex=0;
+      }
+      if(keyCode==DOWN_ARROW)
+      {
+	  imageIndex--;
+	  if(imageIndex<0)
+	      imageIndex=images.length-1;
+      }
+  }
+  
+  function mouseClicked()
+  {
+      imageIndex++;
+      if(imageIndex>=images.length)
+	  imageIndex=0;
+  }
+
+</script>
