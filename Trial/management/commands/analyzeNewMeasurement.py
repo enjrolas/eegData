@@ -166,11 +166,11 @@ class Command(BaseCommand):
       
   def handle(self, *args, **options):
     newMeasurements=Measurement.objects.filter(analysisError=False).filter(analysisStarted=False).order_by('createdAt')
-    if newMeasurements.count()>0:
-      measurement=newMeasurements.first()
-      print("measurement id: %s" % measurement.pk)
-      self.analyzeNewMeasurement(measurement.pk)
-    else:
-      print("no new measurements")
-    print("done")
-    
+ if newMeasurements.count()>0:
+   measurement=newMeasurements.first()
+   print("measurement id: %s" % measurement.pk)
+   self.analyzeNewMeasurement(measurement.pk)
+ else:
+   print("no new measurements")
+   print("done")
+   

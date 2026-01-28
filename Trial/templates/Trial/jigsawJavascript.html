@@ -43,9 +43,19 @@
   var state="setup";
   var calibrationFlashCount=0;
   var toggle=false;
+  var javascriptVersion="1.2";
   
   function preload() {
       font = loadFont('static/fonts/Inconsolata.otf');
+      var startTime=millis();      
+      print("{{ images }}");      
+      {% for image in images %}      
+      print("{{ image }}");      
+      print("{{ image.image.url }}");      
+      images.push(loadImage("{{ image.image.url }}"));      
+      {% endfor %}
+      var endTime=millis();                
+      print("finished loading images in "+ (endTime-startTime) + " milliseconds");    
   }
   
   function setup() {
@@ -157,10 +167,9 @@
       numImages=Number(uri.searchParams.get('totalImages'));
       calibrationFlashes=Number(uri.searchParams.get('calibrationFlashes'));
       calibrationPeriod=Number(uri.searchParams.get('calibrationPeriod'));
-      timestamp=addLeadingZeroIfNeeded(month())+"/"+addLeadingZeroIfNeeded(day())+"/"+addLeadingZeroIfNeeded(year())+" "+addLeadingZeroIfNeeded(hour())+":"+addLeadingZeroIfNeeded(minute());
+      timestamp=addLeadingZeroIfNeeded(month())+"/"+addLeadingZeroIfNeeded(day())+"/"+addLeadingZeroIfNeeded(year())+" "+addLeadingZeroIfNeeded(hour())+":"+addLeadingZeroIfNeeded(minute())+":"+addLeadingZeroIfNeeded(second()+"."+int((Date.now()/1000%1)*1000));
+      print("before start timestamp: "+timestamp);
       trialDict.set("subjectId", subjectId);
-      trialDict.set("timestamp", timestamp);
-      print(trialDict.get("timestamp"));
       trialDict.set("header", "image number, image file index, scrambled?");
       trialDict.set("dataset", dataset);
       trialDict.set("delayBetweenImages", delayBetweenImages+"");
@@ -169,15 +178,8 @@
       trialDict.set("totalImages", numImages+"");
       trialDict.set("calibrationPeriod", calibrationPeriod);
       trialDict.set("calibrationFlashes", calibrationFlashes);
-      var startTime=millis();
-      print("{{ images }}");
-      {% for image in images %}
-      print("{{ image }}");
-      print("{{ image.image.url }}");
-      images.push(loadImage("{{ image.image.url }}"));
-      {% endfor %}
-      var endTime=millis();    
-      print("finished loading images in "+ (endTime-startTime) + " milliseconds");    
+      trialDict.set("javascriptVersion", javascriptVersion);
+      
       //  divisionSlider=createSlider(1, 1000, 500);    
       //    divisionSlider.position(1000, 20);    
       randomize();    
@@ -190,7 +192,13 @@
       lastTransition=0;
       //frameRate(1000/delayBetweenImages);
       frameRate(60);
-      trialStartTime=millis();
+      timestamp=addLeadingZeroIfNeeded(month())+"/"+addLeadingZeroIfNeeded(day())+"/"+addLeadingZeroIfNeeded(year())+" "+addLeadingZeroIfNeeded(hour())+":"+addLeadingZeroIfNeeded(minute())+":"+addLeadingZeroIfNeeded(second());
+      //originally, I put the timestamp here, and this is a problem -- it should have come *after* the calibration flashes
+      //print("after start timestamp:  "+timestamp);
+      trialDict.set("beforeCalibrationFlashesTimestamp", timestamp);            
+      print(trialDict.get("timestamp"));      
+      
+      //trialStartTime=millis();
   }
   
   function userInterface(show)  
@@ -268,7 +276,12 @@
           }
 	  else
 	  {
-	      state="running";
+	      //in v1.2, I put 'calibrationFlashesTimeStamp' before starting the calibration flashes and 'timestamp' after the calibration flashes are completed.  In v1.1, there is only 'timestamp', which comes before loading images and the calibration flashes timestamp.  I believe loading images are non-blocking, so the timestamp only adds 6ms of error, but there is some stutter when it presents the images for the first time.  In v1.2, I put the images in pre-load, which should get rid of all those delays 
+	      timestamp=addLeadingZeroIfNeeded(month())+"/"+addLeadingZeroIfNeeded(day())+"/"+addLeadingZeroIfNeeded(year())+" "+addLeadingZeroIfNeeded(hour())+":"+addLeadingZeroIfNeeded(minute())+":"+addLeadingZeroIfNeeded(second()+"."+int((Date.now()/1000%1)*1000));
+              trialDict.set("timestamp", timestamp);
+	      trialStartTime=millis()
+	      toggle=!toggle;  //this is an important v1.2 thing -- without it, we don't have a calibration flash on the first image presentation, which is the case in v1.1
+              state="running";
 	  }
 	  
 	  
@@ -434,29 +447,37 @@
       angle = (2 * PI) / map(mouseX, 0, width, 1, 40);
       angularSpeed = map(mouseY - height / 2, 0, height / 2, 0, 0.05);
   }
-  function keyPressed() {
-      if (key == "s") showStroke = !showStroke;
-      if (key == "r") randomize();
-      if (key==' ')
-      {
-	  recognitionPresses.push(millis()-trialStartTime);
-	  print("key pressed: "+ recognitionPresses);
-      }
-      if(key=='S')
-          scrambled=!scrambled;
-      if(keyCode==UP_ARROW)
-      {
-	  imageIndex++;
-	  if(imageIndex>=images.length)
-	      imageIndex=0;
-      }
-      if(keyCode==DOWN_ARROW)
-      {
-	  imageIndex--;
-	  if(imageIndex<0)
-	      imageIndex=images.length-1;
-      }
+
+  function touchStarted(){
+      timeDiff=millis()-trialStartTime;
+      if(timeDiff!=null)
+	  recognitionPresses.push(millis()-trialStartTime);           
+      print("screen touched: "+ recognitionPresses);
   }
+
+  function keyPressed() {
+      if (key == "s") showStroke = !showStroke;      
+      if (key == "r") randomize();      
+      if (key==' ')      
+      {      
+	  recognitionPresses.push(millis()-trialStartTime);               
+          print("key pressed: "+ recognitionPresses);      
+      }      
+      if(key=='S')      
+          scrambled=!scrambled;      
+      if(keyCode==UP_ARROW)      
+      {      
+          imageIndex++;      
+          if(imageIndex>=images.length)      
+              imageIndex=0;      
+      }      
+      if(keyCode==DOWN_ARROW)      
+      {      
+          imageIndex--;      
+          if(imageIndex<0)      
+              imageIndex=images.length-1;      
+      }      
+}
   
   function mouseClicked()
   {

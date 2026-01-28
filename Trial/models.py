@@ -14,12 +14,12 @@ class Trial(models.Model):
   KEY="k"
   MICROPHONE="m"
   STYLE_CHOICES =[
-      (KEY, "Key-Type Interaction"), 
-      (MICROPHONE, "Microphone-and-Clicker Interaction"), 
-    ]
+    (KEY, "Key-Type Interaction"), 
+    (MICROPHONE, "Microphone-and-Clicker Interaction"), 
+  ]
 
   timestamp = models.DateTimeField(auto_now_add=True)
-  javascriptVersion=models.TextField(default="1.1")
+  javascriptVersion=models.TextField(default="1.2")
   subject=models.ForeignKey(Subject, blank=True, on_delete=models.PROTECT)
   trialData=models.TextField(blank=True)
   recognitionPresses=models.TextField(blank=True)
@@ -32,7 +32,20 @@ class Trial(models.Model):
   edfFile=models.FileField(upload_to="trialData", blank=True)
   layFile=models.FileField(upload_to="trialData", blank=True)
   statFile=models.FileField(upload_to="trialData", blank=True)
-  calibrationFlashes=models.IntegerField(default=5)
+  EDFStartTime=models.TextField(default="00:00:00.0")
+  calibrationFlashes=models.FloatField(default=5)
   calibrationPeriod=models.IntegerField(default=60)
+  analysisStarted=models.BooleanField(default=False)
+  analysisError=models.BooleanField(default=False)
+  periStimulusAverage=models.FileField(upload_to="analysis", blank=True)
+  filteredPeriStimulusAverage=models.FileField(upload_to="analysis", blank=True)
+  filteredPeriPromptStimulusAverage=models.FileField(upload_to="analysis", blank=True)
+  periNonStimulusAverage=models.FileField(upload_to="analysis", blank=True)
+  analysisData=models.FileField(upload_to="analysis", blank=True)
+  analysisOutput=models.TextField(blank=True)
   def __str__(self):
-    return "Trial #%2d:  subject %s at %s" % (self.pk, self.subject, self.trialTimestamp)
+    if self.edfFile:
+      data="data file present"
+    else:
+      data="no data"
+    return "Trial #%2d:  subject %s at %s -- %s" % (self.pk, self.subject, self.trialTimestamp, data)

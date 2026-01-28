@@ -7,6 +7,7 @@ from .models import *
 from django.http import JsonResponse
 import json
 from django.views.decorators.csrf import csrf_exempt
+from django.core import serializers
 
 def jigsaw(request):
   logger.debug("home view")
@@ -38,7 +39,7 @@ def home(request):
 def jsonRecorder(request):
   logger.debug(request.POST)
   subjectId=request.POST.get("subjectId").upper()
- # subjectId=request.POST["subjectId"].upper()
+  # subjectId=request.POST["subjectId"].upper()
   timestamp=request.POST.get("timestamp")
   dataset=request.POST.get("dataset")
   delayBetweenImages=int(request.POST.get("delayBetweenImages"))
@@ -49,6 +50,7 @@ def jsonRecorder(request):
   trialStyle=request.POST.get("trialStyle")
   calibrationFlashes=request.POST.get("calibrationFlashes")
   calibrationPeriod=request.POST.get("calibrationPeriod")
+  javascriptVersion=request.POST.get("javascriptVersion")
   trial=Trial()
   subject=Subject.objects.get(subjectId=subjectId)
   trial.subject=subject
@@ -62,9 +64,9 @@ def jsonRecorder(request):
   trial.totalImages=totalImages
   trial.recognitionPresses=recognitionPresses
   trial.trialStyle=trialStyle
-  trial.calibratedFlashes=calibrationFlashes
+  trial.calibrationFlashes=calibrationFlashes
   trial.calibrationPeriod=calibrationPeriod
-  
+  #trial.javascriptVersion=javascriptVersion
   trial.save()
   change_url = reverse("admin:Trial_trial_change", args=(trial.id,))
   return JsonResponse({"response":"ok", "trial": trial.pk, 'adminUrl':change_url, 'timestamp': timestamp})
@@ -80,3 +82,28 @@ def newSubject(request):
   subject.subjectId=request.POST.get('subjectId').upper()
   subject.save()
   return JsonResponse({"subjectId":str(subject)})
+
+def trialData(request, id):
+  trial=Trial.objects.get(pk=id)
+  jsonResponse={
+    "trial": trial.pk,
+    "timestamp": trial.timestamp,    
+    }
+  data = serializers.serialize('json', [trial])
+  jsonData=json.loads(data)
+  return JsonResponse(jsonData[0], safe=False)
+
+def analyses(request):
+  trials=Trial.objects.all().order_by('-timestamp')
+  context={
+    "trials": trials,
+    }
+  return render(request, "Trial/analyses.html", context)
+
+def analysis(request, id):
+  trial=Trial.objects.get(pk=id)
+  context={
+    "trial": trial
+    }
+  return render(request, "Trial/analysis.html", context)
+  

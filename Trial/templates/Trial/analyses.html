@@ -1,0 +1,19 @@
+<html>
+  <head>
+    <style>
+      span.error{
+	  color: red;
+      }
+      span.success { 
+	  color: blue;
+      }      
+    </style>
+  </head>  
+  <body>
+    <ul>
+    {% for trial in trials %}
+    <li><span class="{% if trial.analysisError %}error{% else %}success{% endif %}"> Analysis Complete  </span><a href="{% url 'analysis' trial.pk %}">{{ trial }}</li></a>
+    {% endfor %}
+    </ul>
+  </body>
+</html>
