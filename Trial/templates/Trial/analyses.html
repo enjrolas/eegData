@@ -31,6 +31,7 @@
     .new:hover { background: color-mix(in srgb, var(--trace) 10%, transparent); }
     :focus-visible { outline: 3px solid var(--marker); outline-offset: 2px; }
 
+    .keyline { max-width: 80ch; margin: 0 0 14px; }
     .counts { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 0 0 16px; padding: 0; list-style: none; color: var(--muted); }
     .counts b { color: var(--ink); font-size: 1.25rem; margin-right: 4px; }
 
@@ -54,6 +55,17 @@
     .badge.good { background: var(--good); } .badge.warn { background: var(--warn); }
     .badge.bad { background: var(--bad); } .badge.muted { background: var(--none); }
     .best.sig { font-weight: 700; }
+    .tags { display: flex; flex-wrap: wrap; gap: 4px; }
+    .tag { display: inline-block; border-radius: 6px; padding: 1px 8px; font-size: .8rem; white-space: nowrap;
+           text-decoration: none; border: 1.5px solid var(--none); color: var(--ink); }
+    .tag:hover { background: color-mix(in srgb, var(--trace) 10%, transparent); }
+    .tag.sync { border-color: var(--warn); } .tag.data { border-color: var(--bad); }
+    .tag.result { border-color: var(--good); } .tag.trial { border-color: var(--trace); }
+    .tagbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 12px; }
+    .tagbar .tag.on { background: color-mix(in srgb, var(--trace) 14%, var(--sheet)); font-weight: 700; }
+    .lat b { font-size: 1.05rem; white-space: nowrap; }
+    .lat small { color: var(--muted); display: block; font-size: .8rem; white-space: nowrap; }
+    .tag.channel { border-color: var(--line); background: color-mix(in srgb, var(--trace) 8%, var(--sheet)); }
     .best small { color: var(--muted); display: block; font-weight: 400; }
     .links a { margin-right: 12px; white-space: nowrap; }
     .note { color: var(--muted); font-size: .9rem; margin-top: 12px; }
@@ -80,6 +92,8 @@
     <a class="new" href="{% url 'home' %}">Set up a new trial</a>
   </header>
 
+  <p class="keyline"><b>RP latency</b> is the key number: the median time from an image appearing on screen to the recognition-potential peak, measured on each clear image on the trial's best channel. ± is half the 95% confidence interval of the median.</p>
+
   <ul class="counts">
     <li><b>{{ n_data }}</b>trials with EEG data</li>
     <li><b>{{ n_ok }}</b>analysed without warnings</li>
@@ -91,10 +105,15 @@
     <button type="button" data-filter="all" aria-pressed="false">All {{ n_total }} trials</button>
   </div>
 
+  <div class="tagbar" aria-label="Filter by tag">
+    {% for t in all_tags %}<a class="tag {{ t.category }}{% if tag.slug == t.slug %} on{% endif %}" href="?tag={{ t.slug }}" title="{{ t.description }}">{{ t.name }}</a>{% endfor %}
+    {% if tag %}<a href="?">Show all trials</a>{% endif %}
+  </div>
+
   <div class="sheet">
     <table>
       <thead>
-        <tr><th>Trial</th><th>Subject</th><th>Recorded</th><th>Analysis</th><th class="bestcol">Best channel ({{ window }})</th><th>Electrodes</th><th></th></tr>
+        <tr><th>Trial</th><th>Subject</th><th>Recorded</th><th>Analysis</th><th class="latcol">RP latency</th><th class="bestcol">Best channel ({{ window }})</th><th>Electrodes</th><th>Tags</th><th></th></tr>
       </thead>
       <tbody>
       {% for r in rows %}
@@ -103,10 +122,12 @@
           <td data-label="Subject">{{ r.trial.subject }}</td>
           <td class="when" data-label="Recorded">{{ r.trial.trialTimestamp|default:"—" }}</td>
           <td class="status"><span class="badge {{ r.cls }}">{{ r.label }}</span></td>
+          <td class="lat" data-label="RP latency">{% if r.lat %}<b>{{ r.lat.ms }} ms</b><small>±{{ r.lat.pm }} · 95% CI {{ r.lat.lo }}–{{ r.lat.hi }} · {{ r.lat.ch }}</small>{% else %}—{% endif %}</td>
           <td class="best{% if r.best.sig %} sig{% endif %}" data-label="Best">
             {% if r.best %}{{ r.best.channel }} {{ r.best.uv }} µV, p={{ r.best.p }}{% if r.best.peak %}<small>largest difference at {{ r.best.peak }} ms</small>{% endif %}{% else %}—{% endif %}
           </td>
-          <td data-label="Electrodes">{{ r.channels|default:"—" }}</td>
+          <td data-label="Electrodes"><span class="tags">{% for t in r.chtags %}<a class="tag channel" href="?tag={{ t.slug }}" title="{{ t.description }}">{{ t.name }}</a>{% empty %}—{% endfor %}</span></td>
+          <td data-label="Tags"><span class="tags">{% for t in r.tags %}<a class="tag {{ t.category }}" href="?tag={{ t.slug }}" title="{{ t.description }}">{{ t.name }}</a>{% endfor %}</span></td>
           <td class="links">
             {% if r.trial.periStimulusAverage %}<a href="{% url 'analysis' r.trial.pk %}">Results</a>{% endif %}
             {% if r.trial.analysisReport %}<a href="{{ r.trial.analysisReport.url }}">PDF</a>{% endif %}
@@ -127,7 +148,7 @@
       buttons.forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.filter === mode)); });
     }
     buttons.forEach(function (b) { b.addEventListener('click', function () { apply(b.dataset.filter); }); });
-    apply('data');
+    apply({% if tag %}'all'{% else %}'data'{% endif %});
   })();
 </script>
 </body>

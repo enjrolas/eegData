@@ -9,6 +9,24 @@ class Subject(models.Model):
   def __str__(self):
     return "%s" % (self.subjectId)
   
+class Tag(models.Model):
+  """A characteristic found while analysing a trial.  Automatic tags are set by
+  the analysis (Analysis/tags.py); others can be created and attached by hand."""
+  CATEGORIES=[("data","Data"),("sync","Sync"),("trial","Trial"),("result","Result"),
+              ("channel","Channel"),("note","Note")]
+  slug=models.SlugField(max_length=64, unique=True)
+  name=models.CharField(max_length=100)
+  category=models.CharField(max_length=16, choices=CATEGORIES, default="note")
+  description=models.TextField(blank=True)
+  automatic=models.BooleanField(default=False, help_text="set and cleared by the analysis")
+  order=models.IntegerField(default=100)
+
+  class Meta:
+    ordering=["order", "name"]
+
+  def __str__(self):
+    return self.name
+
 class Trial(models.Model):
   # iterable
   KEY="k"
@@ -45,7 +63,19 @@ class Trial(models.Model):
   periNonStimulusAverage=models.FileField(upload_to="analysis", blank=True)
   analysisData=models.FileField(upload_to="analysis", blank=True)
   analysisReport=models.FileField(upload_to="analysis/reports", blank=True)
+  syncProof=models.FileField(upload_to="analysis", blank=True)
+  clearVsScrambled=models.FileField(upload_to="analysis", blank=True)
+  differenceWave=models.FileField(upload_to="analysis", blank=True)
+  keypressLockedAverage=models.FileField(upload_to="analysis", blank=True)
+  alignmentCheck=models.FileField(upload_to="analysis", blank=True)
+  imageSyncPulses=models.IntegerField(null=True, blank=True)
+  # the key number: median time from image presentation to the RP (best channel)
+  rpLatencyMs=models.FloatField(null=True, blank=True)
+  rpLatencyCiLowMs=models.FloatField(null=True, blank=True)
+  rpLatencyCiHighMs=models.FloatField(null=True, blank=True)
+  rpLatencyChannel=models.CharField(max_length=16, blank=True)
   analysisOutput=models.TextField(blank=True)
+  tags=models.ManyToManyField(Tag, blank=True, related_name="trials")
   def __str__(self):
     if self.edfFile:
       data="data file present"

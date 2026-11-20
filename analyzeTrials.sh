@@ -12,6 +12,8 @@ then
     source /home/japhy/eegdata/.env/bin/activate
     #/home/japhy/eegdata/manage.py analysis 
     /home/japhy/eegdata/manage.py analysis >> "$logfile" 2>&1
+    # tags for trials the analysis doesn't visit (e.g. "no data file")
+    /home/japhy/eegdata/manage.py tag_trials >> "$logfile" 2>&1
     
 
 else

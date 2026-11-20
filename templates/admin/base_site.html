@@ -84,6 +84,12 @@
   .eeg-results { max-width: 1200px; }
   .eeg-head { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
   .eeg-head .eeg-badge { font-size: 14px; padding: 5px 14px; }
+  .eeg-tag { display: inline-block; border-radius: 6px; padding: 1px 7px; margin: 1px 0; font-size: 12px;
+             white-space: nowrap; border: 1.5px solid var(--eeg-muted); color: var(--body-fg); }
+  .eeg-tag-sync { border-color: var(--eeg-warn); } .eeg-tag-data { border-color: var(--eeg-bad); }
+  .eeg-tag-result { border-color: var(--eeg-good); } .eeg-tag-trial { border-color: var(--eeg-trace); }
+  .eeg-tag-channel { border-color: var(--border-color); background: var(--darkened-bg); }
+  .eeg-tags { margin: 4px 0 10px; }
   .eeg-meta { color: var(--body-quiet-color); margin: 6px 0; }
   .eeg-warning { background: var(--message-warning-bg); border-left: 4px solid var(--eeg-warn); padding: 8px 12px; margin: 8px 0; }
   table.eeg-table { margin: 12px 0; border-collapse: collapse; }

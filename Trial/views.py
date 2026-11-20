@@ -101,7 +101,11 @@ def analyses(request):
   from Analysis.summary import load_summary, status_of
   from Analysis.labels import WINDOW_TEXT
   rows=[]
-  for trial in Trial.objects.select_related('subject').order_by('-timestamp'):
+  trials=Trial.objects.select_related('subject').prefetch_related('tags').order_by('-timestamp')
+  tag=Tag.objects.filter(slug=request.GET.get('tag')).first() if request.GET.get('tag') else None
+  if tag:
+    trials=trials.filter(tags=tag)
+  for trial in trials:
     summary=load_summary(trial) if trial.edfFile else None
     cls, label=status_of(trial, summary)
     best=None
@@ -109,11 +113,21 @@ def analyses(request):
       best={"channel": summary["best_channel"], "uv": "%+.1f" % summary["best_mean_uv"],
             "p": "%.3f" % summary["best_p"], "sig": summary["best_p"] < 0.05,
             "peak": "%.0f" % summary["best_peak_ms"] if summary.get("best_peak_ms") is not None else None}
-    rows.append({"trial": trial, "cls": cls, "label": label, "best": best,
+    lat=None
+    if trial.rpLatencyMs is not None:
+      lat={"ms": "%.0f" % trial.rpLatencyMs, "lo": "%.0f" % trial.rpLatencyCiLowMs,
+           "hi": "%.0f" % trial.rpLatencyCiHighMs, "ch": trial.rpLatencyChannel,
+           "pm": "%.0f" % ((trial.rpLatencyCiHighMs - trial.rpLatencyCiLowMs) / 2)}
+    tags=[t for t in trial.tags.all() if t.slug != "no-data-file"]
+    rows.append({"trial": trial, "cls": cls, "label": label, "best": best, "lat": lat,
+                 "tags": [t for t in tags if t.category != "channel"],
+                 "chtags": [t for t in tags if t.category == "channel"],
                  "channels": ", ".join(summary.get("channels", [])) if summary else ""})
   with_data=[r for r in rows if r["trial"].edfFile]
   context={
     "rows": rows,
+    "tag": tag,
+    "all_tags": Tag.objects.filter(trials__isnull=False).distinct(),
     "window": WINDOW_TEXT,
     "n_total": len(rows),
     "n_data": len(with_data),
@@ -123,9 +137,13 @@ def analyses(request):
   return render(request, "Trial/analyses.html", context)
 
 def analysis(request, id):
+  from Analysis.labels import IMAGES
   trial=Trial.objects.get(pk=id)
+  figures=[(title, getattr(trial, field).url) for _n, field, title, _note in IMAGES
+           if getattr(trial, field)]
   context={
-    "trial": trial
+    "trial": trial,
+    "figures": figures,
     }
   return render(request, "Trial/analysis.html", context)
   

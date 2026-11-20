@@ -47,6 +47,8 @@ from pyedflib import highlevel
 # recording are used.
 CANDIDATE_CHANNELS = ["O1", "O2", "Oz", "T5", "T6", "P3", "P4", "Pz", "Cz"]
 RP_SITES = ("O1", "O2", "Oz", "T5", "T6")
+KEYPRESS_SHOW = ["O1", "O2", "T5", "T6"]   # always drawn on the keypress-locked average
+RP_LATENCY_MIN_EPOCHS = 10
 CONNECTED_MAX_UV = 50.0       # std of filtered signal; good ones ~10-20, floating 100+
 
 LINE_FREQ = 60.0
@@ -63,15 +65,10 @@ PHOTODIODE_MIN_GAIN = 0.25    # best match must beat typical match by this much
 PHOTODIODE_GOOD_MATCH = 0.7   # below this, alignment is flagged as weak
 OFFSET_STEP_MS = 20.0         # coarse search step (refined to 1 ms after)
 
-# image name -> Trial model field
-FIELDS = {
-    "erp": "periStimulusAverage",
-    "difference": "filteredPeriStimulusAverage",
-    "keypress": "filteredPeriPromptStimulusAverage",
-    "alignment": "periNonStimulusAverage",
-}
-
 from Analysis.labels import IMAGES, RP_WINDOW_MS, PEAK_SEARCH_MS, SITE_DOMAIN  # noqa: E402
+
+# image name -> Trial model field
+FIELDS = {name: field for name, field, _title, _note in IMAGES}
 
 COLORS = {"clear": "#c0392b", "scr": "#2c6fbb"}
 
@@ -126,11 +123,27 @@ def trial_from_model(t):
     td = json.loads(t.trialData)
     presses = json.loads(t.recognitionPresses) if t.recognitionPresses else []
     trial = parse_trial_json(td, presses)
+    # calibration burst: half-period from the trial (the model default of 60 ms
+    # predates the setting being recorded — the page's default is 1000 ms), and
+    # from v1.3 the JS time of every calibration flip relative to trial start
+    period = t.calibrationPeriod if t.calibrationPeriod and t.calibrationPeriod >= 200 else 1000
+    cal_js = None
+    if t.calibrationTimestamps and t.trialStartMillis:
+        try:
+            ms = [float(v) for v in t.calibrationTimestamps.split(",")[1::2]]
+            cal_js = np.array(ms) - float(t.trialStartMillis)
+        except ValueError:
+            cal_js = None
     trial.update({
         "pk": t.pk,
         "edf": t.edfFile.path,
         "subject": str(t.subject),
         "timestamp": t.trialTimestamp,
+        "cal_half_period_ms": period / 2.0,
+        "cal_js": cal_js,
+        "delay_ms": float(t.delayBetweenImages or 300),
+        "cal_flips_model": int(round(2 * t.calibrationFlashes)) if t.calibrationFlashes else None,
+        "total_images": int(t.totalImages) if t.totalImages else None,
     })
     return trial
 
@@ -306,6 +319,148 @@ def transition_times(trace, fs, peaks_ms):
     return out, refined
 
 
+CAL_TOL = 0.15          # calibration flip intervals must be within ±15% of the half-period
+CAL_MIN_INTERVALS = 5   # at least this many evenly spaced flips in a row
+# An anchor is checked against the first/last 10 images: each needs a flip within this
+# distance.  It only has to tell the right image from a neighbour (~316 ms away), and
+# some sessions' JS log runs 40-80 ms behind the screen, so allow under half an interval.
+CAL_FIRST_IMAGE_TOL = 120.0
+FRAME_MS = 1000 / 60    # one display frame
+
+
+def all_transitions(trace, fs, start_ms=None, end_ms=None):
+    """
+    Every state change on a sync trace (both directions), timed at the
+    transition.  With start/end, spikes are thresholded on that stretch alone
+    (the calibration flips can be smaller than the image flips).  A biphasic
+    flip is detected on both polarities a few ms apart; those are merged.
+    """
+    a = 0 if start_ms is None else max(int(start_ms * fs / 1000), 0)
+    b = len(trace) if end_ms is None else min(int(end_ms * fs / 1000), len(trace))
+    seg = trace[a:b]
+    if len(seg) < fs:
+        return np.array([])
+    pos, neg = detect_spikes(seg, fs), detect_spikes(-seg, fs)
+    peaks = np.sort(np.concatenate([pos, neg])) + a / fs * 1000.0
+    tt, _ = transition_times(trace, fs, peaks)
+    tt = np.sort(tt)
+    if len(tt) > 1:                               # merge double detections of one flip
+        keep = np.concatenate([[True], np.diff(tt) > 60.0])
+        tt = tt[keep]
+    return tt
+
+
+def _anchor_score(tt, t0, first_images_js):
+    """How well an anchor predicts the first images: (fraction matched, median error ms)."""
+    pred = t0 + np.asarray(first_images_js, dtype=float)
+    k = np.clip(np.searchsorted(tt, pred), 1, len(tt) - 1)
+    err = np.where(np.abs(tt[k - 1] - pred) < np.abs(tt[k] - pred), tt[k - 1] - pred, tt[k] - pred)
+    hit = np.abs(err) < CAL_FIRST_IMAGE_TOL
+    return float(hit.mean()), (float(np.median(err[hit])) if hit.any() else None)
+
+
+def find_calibration(tt, first_images_js, approx_first_image_edf, half_period_ms=500.0,
+                     cal_js=None, delay_ms=300.0):
+    """
+    Burst anchor — the sync gold standard.  Finds the calibration burst before
+    the first image and returns the EDF time of JS time zero, or None.
+
+    Every page version flips the sync patch every calibrationPeriod/2 for
+    calibrationFlashes cycles, then shows the first image once `delay` has
+    passed since the last calibration flip (v1.2+ adds a short trial-start
+    blip in between).  So the first flip after the burst is image 1 — which
+    pins down which flip is which.  (Before v1.2 JS time zero was the start of
+    the burst, from v1.2 its end; pinning image 1 works for both.)  From v1.3
+    the JS times of the calibration flips are recorded and fitted directly.
+
+    Bursts faster than ~150 ms per flip (early 60 ms-period sessions) cannot be
+    resolved at 250 Hz; those trials rely on the end anchor.
+    """
+    if half_period_ms < 150:
+        return None
+    first_images_js = np.asarray(first_images_js, dtype=float)[:10]
+    iv = np.diff(tt)
+    good = np.abs(iv - half_period_ms) < CAL_TOL * half_period_ms
+    best = None
+    for e in range(2, len(tt) - 1):              # e = index of last calibration flip
+        if good[e]:
+            continue                              # the run continues past e
+        r = 0
+        while e - 1 - r >= 0 and good[e - 1 - r]:
+            r += 1
+        if r < 2:                                 # at least 3 evenly spaced flips
+            continue
+        b = e - r                                 # first flip of the run
+        if r < CAL_MIN_INTERVALS and b > 0 and tt[b] - tt[b - 1] < 1.5 * half_period_ms:
+            continue                              # a short run must stand alone
+        n = e + 1
+        blip = tt[n] - tt[e] < 120
+        if blip:
+            n += 1                                # v1.2+ trial-start blip
+            if n >= len(tt):
+                continue
+        gap = tt[n] - tt[e]
+        if delay_ms - 20 <= gap <= delay_ms + 100:
+            # image 1 is the flip that follows the burst
+            t0_pin = float(tt[n] - first_images_js[0])
+            how = "first image pinned to the flip after the burst"
+        else:
+            # image 1's flip not detected: the page shows it one `delay` (plus up
+            # to a frame) after the last calibration flip
+            t0_pin = float(tt[e] + delay_ms + FRAME_MS / 2 - first_images_js[0])
+            how = "first image timed one delay after the last calibration flip"
+        cand = {"t0_ms": t0_pin, "how": how, "fit_spread_ms": None}
+        if cal_js is not None and len(cal_js) >= 2:
+            k = min(len(cal_js), r + 1)
+            fit = tt[e - k + 1:e + 1] - np.asarray(cal_js[-k:], dtype=float)
+            if abs(np.median(fit) - t0_pin) < CAL_FIRST_IMAGE_TOL:
+                cand = {"t0_ms": float(np.median(fit)), "how": "fitted on %d calibration flips "
+                        "with recorded JS times" % k, "fit_spread_ms": float(np.std(fit))}
+        frac, err = _anchor_score(tt, cand["t0_ms"], first_images_js)
+        dist = abs(approx_first_image_edf - (cand["t0_ms"] + first_images_js[0]))
+        if dist > 2500 or frac < 0.6:
+            continue
+        cand.update({"kind": "burst", "n_flips": r + 1, "half_period_ms": float(np.median(iv[b:e])),
+                     "start_ms": float(tt[b]), "end_ms": float(tt[e]), "start_blip_seen": bool(blip),
+                     "first_images_matched": frac, "first_image_err_ms": err, "_dist": dist})
+        if best is None or dist < best["_dist"]:
+            best = cand
+    if best:
+        best.pop("_dist")
+    return best
+
+
+def find_end_anchor(tt, stim_ms, approx_t0, slope, record_end_ms, delay_ms=300.0):
+    """
+    End anchor: count back from the end of the image train.  When the trial
+    completes the page stops drawing the patch; if it was white, that adds one
+    more flip ~200 ms after the last image — sooner than any image interval —
+    which is dropped.  The remaining last flip is the last logged image.  Only
+    valid if the recording carries on for a second afterwards with no flips.
+    """
+    if len(tt) < 3:
+        return None
+    pred_last = approx_t0 + stim_ms[-1] * (1 + slope)
+    near = np.where(np.abs(tt - pred_last) < 2500)[0]
+    if not len(near):
+        return None
+    k = near.max()
+    if k < len(tt) - 1 or record_end_ms - tt[k] < 1000:
+        return None                               # flips continue, or recording stops too soon
+    removal = tt[k] - tt[k - 1] < delay_ms - 60
+    if removal:
+        k -= 1                                    # patch-removal flip after the last image
+    t0 = float(tt[k] - stim_ms[-1] * (1 + slope))
+    last_js = stim_ms[-10:]
+    frac, err = _anchor_score(tt, t0 + last_js[0] * slope, last_js)
+    if frac < 0.6:
+        return None
+    return {"kind": "end", "t0_ms": t0, "last_flip_ms": float(tt[k]),
+            "how": "last flip of the image train = last image%s" % (
+                " (patch-removal flip after it dropped)" if removal else ""),
+            "removal_flip": bool(removal), "last_images_matched": frac, "last_image_err_ms": err}
+
+
 def align(trial, signals, labels, fs, header, photodiode=None):
     """
     Returns (onsets_ms, clock_map, info).  clock_map converts JS time to EDF
@@ -341,14 +496,52 @@ def align(trial, signals, labels, fs, header, photodiode=None):
     peaks, mask = pd["spikes"], pd["mask"]
     # time each flip at its change of state, not at the spike's peak
     spikes, refined = transition_times(trace, fs, peaks)
-    s = stim_ms + pd["offset"]
-    j = np.clip(np.searchsorted(s, spikes), 1, len(s) - 1)
-    j = np.where(np.abs(spikes - s[j - 1]) <= np.abs(spikes - s[j]), j - 1, j)
-    resid = spikes - s[j]
-    ok = (np.abs(resid) < 2 * PHOTODIODE_MATCH_MS) & mask[j]
-    drift = np.polyfit(s[j[ok]], resid[ok], 1)
-    off = pd["offset"]
-    clock_map = lambda js: (js + off) + np.polyval(drift, js + off)
+    def match(t0, slope=0.0):
+        """Pair each image-era flip with its nearest logged image for this clock."""
+        s = t0 + stim_ms * (1.0 + slope)
+        j = np.clip(np.searchsorted(s, spikes), 1, len(s) - 1)
+        j = np.where(np.abs(spikes - s[j - 1]) <= np.abs(spikes - s[j]), j - 1, j)
+        resid = spikes - s[j]
+        return j, resid, (np.abs(resid) < 2 * PHOTODIODE_MATCH_MS) & mask[j]
+
+    # image-only alignment: best offset from the flips, plus linear drift.
+    # Image flips are nearly periodic, so this can lock on one image early or
+    # late — the anchors below settle which flip is which.
+    j, resid, ok = match(pd["offset"])
+    a1, a0 = np.polyfit(stim_ms[j[ok]], resid[ok], 1)
+    slope_img = float(a1)
+    t0_img = float(pd["offset"] + a0)                               # EDF time of JS time 0
+
+    # anchors: calibration burst (gold standard), else the end of the image train
+    approx_first = t0_img + stim_ms[0]
+    tt_start = all_transitions(trace, fs, approx_first - 20000, approx_first + 3000)
+    cal = find_calibration(tt_start, stim_ms[:10], approx_first,
+                           trial.get("cal_half_period_ms", 500.0), trial.get("cal_js"),
+                           trial.get("delay_ms", 300.0))
+    approx_last = t0_img + stim_ms[-1] * (1 + slope_img)
+    tt_end = all_transitions(trace, fs, approx_last - 15000, approx_last + 5000)
+    end = find_end_anchor(tt_end, stim_ms, t0_img, slope_img, len(trace) / fs * 1000.0,
+                          trial.get("delay_ms", 300.0))
+    anchored = cal is not None
+    if anchored:
+        # gold standard: JS time zero fixed by the burst; fit only the drift
+        t0 = cal["t0_ms"]
+        j, resid, ok = match(t0, slope_img)
+        x, r = stim_ms[j[ok]], (spikes[ok] - (t0 + stim_ms[j[ok]]))
+        slope = float((x * r).sum() / (x * x).sum()) if ok.any() else slope_img
+        clock_map = lambda js: t0 + js * (1.0 + slope)
+    elif end is not None:
+        # which flip is which from the end of the train; then fit offset and drift
+        j, resid, ok = match(end["t0_ms"], slope_img)
+        a1, a0 = np.polyfit(stim_ms[j[ok]], spikes[ok] - stim_ms[j[ok]], 1)
+        t0, slope = float(a0), float(a1)
+        clock_map = lambda js: t0 + js * (1.0 + slope)
+    else:
+        t0, slope = t0_img, slope_img
+        clock_map = lambda js: t0 + js * (1.0 + slope)
+    drift_ppm = slope * 1e6
+    ref = cal if cal is not None else end
+    match_frac = float(len(np.unique(j[ok])) / max(mask.sum(), 1))
 
     onsets = clock_map(stim_ms)
     corr = np.full(len(stim_ms), np.nan)
@@ -363,8 +556,11 @@ def align(trial, signals, labels, fs, header, photodiode=None):
                   % ("sync crossover" if pair else "sync", pd["channel"], pd["spike_set"],
                      pd["parity"], "crossover of the pair" if pair else "state transition"),
         "ok": True, "channel": pd["channel"], "members": members, "trace": trace,
-        "offset_ms": float(clock_map(0.0)), "drift_ppm": drift[0] * 1e6,
-        "match": pd["match"], "typical": pd["typical"],
+        "offset_ms": float(clock_map(0.0)), "drift_ppm": drift_ppm,
+        "match": match_frac, "typical": pd["typical"],
+        "calibration": cal, "end_anchor": end, "anchored": anchored,
+        "crosscheck_ms": float(t0_img - ref["t0_ms"]) if ref else None,
+        "end_vs_burst_ms": float(end["t0_ms"] - cal["t0_ms"]) if (cal and end) else None,
         "n_matched": int(ok.sum()), "residuals_ms": corr[have],
         "refined_frac": float(refined[ok].mean()) if ok.any() else 0.0,
         "peak_lag_ms": float(np.median((peaks - spikes)[ok & refined])) if (ok & refined).any() else None,
@@ -381,7 +577,7 @@ def filter_channel(x, fs):
     return ss.filtfilt(bb, ba, ss.filtfilt(nb, na, x))
 
 
-def extract_epochs(x, fs, times_ms, window_ms=EPOCH_MS, baseline_ms=BASELINE_MS):
+def extract_epochs(x, fs, times_ms, window_ms=EPOCH_MS, baseline_ms=BASELINE_MS, reject_uv=None):
     """Baseline-corrected epochs [n_kept x n_samples], time axis, n_rejected."""
     n0 = int(round(window_ms[0] * fs / 1000))
     n1 = int(round(window_ms[1] * fs / 1000))
@@ -395,11 +591,50 @@ def extract_epochs(x, fs, times_ms, window_ms=EPOCH_MS, baseline_ms=BASELINE_MS)
             continue
         seg = x[i + n0:i + n1]
         seg = seg - seg[bl].mean()
-        if np.ptp(seg) > REJECT_UV:
+        if np.ptp(seg) > (REJECT_UV if reject_uv is None else reject_uv):
             rejected += 1
             continue
         kept.append(seg)
     return np.array(kept).reshape(-1, len(tax)), tax, rejected
+
+
+def rp_latency(Ec, Es, tax, sign, n_boot=2000, seed=0):
+    """
+    Image-to-RP latency, measured on the average: the peak (of the RP's
+    polarity) of the clear − scrambled difference wave within the peak-search
+    window.  It must be a real local peak, not the window edge.  Error bars:
+    the clear and scrambled images are resampled n_boot times and the peak
+    re-measured; the result is the median of those latencies with their 95%
+    interval.  Returns None if the average has no peak inside the window or
+    fewer than half the resamples do.
+
+    (Single-image peak picking was tried first and is not usable: on single
+    epochs the largest bump is mostly noise, so the median lands near the
+    middle of the window whatever the real latency is.)
+    """
+    srch = (tax >= PEAK_SEARCH_MS[0]) & (tax <= PEAK_SEARCH_MS[1])
+    ts = tax[srch]
+    C, S = Ec[:, srch], Es[:, srch]
+
+    def peak(d):
+        k = int(np.argmax(sign * d))
+        return float(ts[k]) if 0 < k < len(ts) - 1 else np.nan
+
+    observed = peak(C.mean(0) - S.mean(0))
+    if np.isnan(observed) or len(C) < RP_LATENCY_MIN_EPOCHS:
+        return None
+    rng = np.random.default_rng(seed)
+    boots = np.array([peak(C[rng.integers(0, len(C), len(C))].mean(0)
+                           - S[rng.integers(0, len(S), len(S))].mean(0)) for _ in range(n_boot)])
+    ok = boots[~np.isnan(boots)]
+    if len(ok) < n_boot / 2:
+        return None
+    lo, hi = np.percentile(ok, [2.5, 97.5])
+    q1, q3 = np.percentile(ok, [25, 75])
+    return {"peak_ms": observed, "boot_median_ms": float(np.median(ok)),
+            "ci_low_ms": float(lo), "ci_high_ms": float(hi), "q1_ms": float(q1), "q3_ms": float(q3),
+            "n": int(len(C)), "n_scrambled": int(len(S)), "boot_peak_frac": float(len(ok) / n_boot),
+            "polarity": "positive" if sign > 0 else "negative", "method": "bootstrap of the average"}
 
 
 def permutation_test(a, b, mask, n=N_PERMUTATIONS, seed=0):
@@ -442,9 +677,10 @@ def to_png(fig, dpi=90, close=True):
     return buf.getvalue()
 
 
-def render(fig):
-    """(web PNG at 90 dpi, report PNG at 150 dpi); closes the figure."""
-    hi = to_png(fig, dpi=150, close=False)
+def render(fig, hi_dpi=150):
+    """(web PNG at 90 dpi, report PNG at hi_dpi); closes the figure.  Tall
+    stacked figures use a lower hi_dpi to keep memory down."""
+    hi = to_png(fig, dpi=hi_dpi, close=False)
     return to_png(fig), hi
 
 
@@ -462,6 +698,348 @@ def placeholder(pk, title, reason):
 # ---------------------------------------------------------------------------
 # Analysis of one trial
 # ---------------------------------------------------------------------------
+EEG_ORDER = ["FP1", "FP2", "F7", "F3", "Fz", "F4", "F8", "T3", "C3", "Cz", "C4", "T4",
+             "T5", "P3", "Pz", "P4", "T6", "O1", "Oz", "O2", "A1", "A2"]
+
+
+def extra_image(trial):
+    """The jigsaw page logs and shows one image more than requested (its end
+    check runs after logging), drawn on the frame that ends the trial.  That
+    last image N+1 is not counted anywhere in the analysis."""
+    n = trial.get("total_images")
+    return bool(n) and len(trial["stim_ms"]) == n + 1
+
+
+def count_image_pulses(trace, fs, onsets):
+    """Sync flips while images were shown: from image 1 to the last image (the
+    calibration burst before and the patch-removal flip after are excluded)."""
+    tt = all_transitions(trace, fs, onsets[0] - 1500, onsets[-1] + 1500)
+    return int(((tt >= onsets[0] - 60) & (tt <= onsets[-1] + 60)).sum())
+
+
+def sync_proof_figure(pk, trace, fs, al, onsets, trial):
+    """
+    Proof of sync: the sync trace across the calibration burst with every
+    measured calibration flip numbered, the trial-start blip and the first
+    images marked (v1.3: where the recorded JS times put each flip), and the
+    end of the image train counted back from the last image.
+    """
+    c = clean_sync(trace, fs)
+    t = np.arange(len(c)) / fs * 1000.0
+    cal, end = al.get("calibration"), al.get("end_anchor")
+    fig, (a1, a2) = plt.subplots(2, 1, figsize=(18, 8.5), gridspec_kw={"height_ratios": [3, 2]})
+
+    def panel(ax, w0, w1):
+        m = (t >= w0) & (t <= w1)
+        ax.plot(t[m] / 1000, c[m], color="0.35", lw=0.8)
+        lo, hi = (c[m].min(), c[m].max()) if m.any() else (-1, 1)
+        return lo, hi
+
+    # --- start: from before the first sync activity until 3 image pulses are through
+    pre = all_transitions(trace, fs, onsets[0] - 15000, onsets[0] + 200)
+    pre = pre[pre < onsets[0] - 60]
+    first_act = min([v for v in ([pre.min()] if len(pre) else []) +
+                     ([cal["start_ms"]] if cal else [])] or [onsets[0] - 2000])
+    w0, w1 = first_act - 1000, onsets[min(2, len(onsets) - 1)] + 250
+    lo, hi = panel(a1, w0, w1)
+    tt = all_transitions(trace, fs, w0 - 2000, w1 + 2000)
+    tt = tt[(tt >= w0) & (tt <= w1)]
+    if cal:
+        flips = tt[(tt >= cal["start_ms"] - 5) & (tt <= cal["end_ms"] + 5)]
+        for i, f in enumerate(flips, 1):
+            a1.axvline(f / 1000, color="#2f5bea", lw=1)
+            a1.annotate(str(i), (f / 1000, hi), xytext=(0, 4), textcoords="offset points",
+                        ha="center", fontsize=10, fontweight="bold", color="#2f5bea")
+            if i > 1:
+                a1.annotate("%d ms" % round(f - flips[i - 2]), ((f + flips[i - 2]) / 2000, lo),
+                            ha="center", va="bottom", fontsize=7, color="#2f5bea")
+        t0 = cal["t0_ms"]
+        a1.axvline(t0 / 1000, color="#c2185b", lw=1.2, ls="--")
+        a1.annotate("JS t=0", (t0 / 1000, lo), xytext=(3, 12), textcoords="offset points",
+                    fontsize=8, color="#c2185b")
+        if trial.get("cal_js") is not None:
+            for v in trial["cal_js"]:
+                a1.plot([(t0 + v) / 1000], [hi * 0.82], marker="v", color="#c2185b", ms=6)
+        if trial.get("cal_js") is not None:
+            expect = "%d recorded" % len(trial["cal_js"])
+        elif trial.get("cal_flips_model"):
+            expect = "model says %d" % trial["cal_flips_model"]
+        else:
+            expect = "not recorded"
+        status = ("%d calibration flips found (%s) at %.0f ms; %s"
+                  % (len(flips), expect, cal["half_period_ms"], cal["how"]))
+    else:
+        status = "no calibration burst found before the first image"
+    for i in range(min(3, len(onsets))):
+        a1.axvline(onsets[i] / 1000, color="#c0392b", lw=1.6)
+        a1.annotate("img %d" % (i + 1), (onsets[i] / 1000, hi), xytext=(0, 4),
+                    textcoords="offset points", ha="center", fontsize=9, color="#c0392b")
+    a1.set_title("Start of trial — %s" % status, fontsize=10, loc="left")
+    a1.set_xlabel("s in EDF")
+
+    # --- end: last images counted back
+    n = len(onsets)
+    w0, w1 = onsets[max(n - 5, 0)] - 400, onsets[-1] + 1500
+    lo, hi = panel(a2, w0, w1)
+    for i in range(max(n - 5, 0), n):
+        a2.axvline(onsets[i] / 1000, color="#c0392b", lw=1.6)
+        a2.annotate("img %d" % (i + 1), (onsets[i] / 1000, hi), xytext=(0, 4),
+                    textcoords="offset points", ha="center", fontsize=9, color="#c0392b")
+    last_shown = onsets[-1]
+    if al.get("dropped_onset") is not None:
+        last_shown = al["dropped_onset"]
+        a2.axvline(last_shown / 1000, color="0.5", lw=1.4)
+        a2.annotate("img %d (not counted)" % (n + 1), (last_shown / 1000, hi), xytext=(0, 4),
+                    textcoords="offset points", ha="center", fontsize=9, color="0.4")
+    if end and end.get("removal_flip"):
+        tt = all_transitions(trace, fs, w0 - 2000, w1 + 2000)
+        after = tt[(tt > last_shown + 60) & (tt <= w1)]
+        if len(after):
+            a2.axvline(after[0] / 1000, color="0.5", lw=1, ls=":")
+            a2.annotate("patch removed", (after[0] / 1000, lo), xytext=(3, 6),
+                        textcoords="offset points", fontsize=8, color="0.4")
+    a2.set_title("End of trial — %s" % (end["how"] if end else "no clean end of the image train"),
+                 fontsize=10, loc="left")
+    a2.set_xlabel("s in EDF")
+    fig.suptitle("Trial #%d — proof of sync on %s: %d image sync pulses counted for %d images; %s"
+                 % (pk, al["channel"], al.get("image_sync_pulses", 0), n,
+                    "anchored on the calibration burst" if cal else
+                    "anchored on the end of the image train" if end else "NOT anchored"),
+                 fontsize=11)
+    fig.tight_layout()
+    return render(fig)
+
+
+LEGACY_CHANNELS = ["O1", "O2", "T5", "T6"]
+LEGACY_OFFSET_MS = 500        # ± window of the original peri-stimulus averages
+LEGACY_PROMPT_MS = 1000       # original "promptDelay"
+
+
+def legacy_average(x, fs, times_ms, before_ms, after_ms):
+    """The original periStimulusAverage(): plain mean of the notch-filtered
+    signal from -before to +after ms around each event (no bandpass, no
+    baseline, no rejection) — with the epoch indexing fixed (the original
+    wrapped the pre-stimulus half around to the end of the array)."""
+    n0, n1 = int(round(-before_ms * fs / 1000)), int(round(after_ms * fs / 1000))
+    segs = [x[int(t * fs / 1000) + n0:int(t * fs / 1000) + n1] for t in times_ms
+            if int(t * fs / 1000) + n0 >= 0 and int(t * fs / 1000) + n1 <= len(x)]
+    tax = np.arange(n0, n1) * 1000.0 / fs
+    return (np.mean(segs, axis=0) if segs else np.full(len(tax), np.nan)), tax, len(segs)
+
+
+def legacy_figure(pk, signals, labels, fs, times_ms, before_ms, after_ms, title, line_label,
+                  xlabel="ms before/after stimulus presentation", marks=(), rug=None):
+    """Same layout as the original figures: one wide panel, O1/O2/T5/T6 overlaid."""
+    nb, na = ss.iirnotch(LINE_FREQ, 30.0, fs)
+    fig, ax = plt.subplots(figsize=(20, 3))
+    n = 0
+    for c in LEGACY_CHANNELS:
+        if c not in labels:
+            continue
+        x = ss.filtfilt(nb, na, signals[labels.index(c)])
+        avg, tax, n = legacy_average(x, fs, times_ms, before_ms, after_ms)
+        ax.plot(tax, avg, label="%s %s" % (c, line_label))
+    for xv, lab in marks:
+        ax.axvline(xv, color="k", lw=0.8, ls="--")
+        if lab:
+            ax.annotate(lab, (xv, 1), xycoords=("data", "axes fraction"), xytext=(3, -12),
+                        textcoords="offset points", fontsize=8)
+    if rug is not None and len(rug):
+        ax.plot(rug, np.full(len(rug), ax.get_ylim()[0]), "|", color="0.3", ms=8, alpha=0.6)
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.legend(loc="upper right")
+    fig.tight_layout()
+    return render(fig)
+
+
+def electrode_rows(signals, labels, fs, exclude):
+    """Every EEG electrode in the recording (sync inputs excluded), filtered once."""
+    names = [c for c in EEG_ORDER if c in labels and c not in exclude]
+    names += [c for c in labels if c not in names and c not in exclude and c not in SYNC_CHANNELS
+              and not c.upper().startswith(("EKG", "CH", "EVENT", "STATUS"))]
+    rows = []
+    for c in names:
+        x = filter_channel(signals[labels.index(c)], fs)
+        noise = float(np.std(x))
+        rows.append({"c": c, "x": x, "noise": noise, "clean": noise < CONNECTED_MAX_UV})
+    return rows
+
+
+def stacked_figure(pk, rows, fs, sets, title, window_ms=EPOCH_MS, baseline_ms=BASELINE_MS,
+                   diff=False, stats=None, marks=(), rug=None, xlabel="ms after image onset",
+                   shade_rp=True):
+    """
+    One row per electrode on a shared time axis.  `sets` is a list of
+    (event times, colour, label); each is averaged ±2 SE.  diff=True adds the
+    difference of the first two (black).  Clean electrodes share one amplitude
+    scale; noisy ones are drawn on their own scale without artefact rejection
+    and greyed.  `marks`: (x, label) vertical lines; `rug`: per-epoch x
+    positions drawn as ticks (e.g. each epoch's image onset).
+    """
+    if not rows:
+        return placeholder(pk, title, "No EEG electrodes in this recording")
+    stats = stats or {}
+    data = []
+    for r in rows:
+        means = []
+        for times, col, lab in sets:
+            E, tax, _ = extract_epochs(r["x"], fs, times, window_ms, baseline_ms,
+                                       reject_uv=None if r["clean"] else np.inf)
+            means.append((E, col, lab))
+        data.append((r, means, tax))
+    peaks = [np.abs(E.mean(0)).max() for r, means, tax in data if r["clean"]
+             for E, col, lab in means if len(E) >= 5]
+    shared = 1.15 * max(peaks) if peaks else None
+    fig, axes = plt.subplots(len(data), 1, figsize=(16, 1.15 * len(data) + 1.8), sharex=True,
+                             squeeze=False)
+    for ax, (r, means, tax) in zip(axes[:, 0], data):
+        for E, col, lab in means:
+            if len(E):
+                m, se = E.mean(0), E.std(0) / np.sqrt(len(E))
+                ax.plot(tax, m, color=col, lw=1.2, label="%s (n=%d)" % (lab, len(E)))
+                ax.fill_between(tax, m - 2 * se, m + 2 * se, color=col, alpha=0.15, lw=0)
+        if diff and len(means) >= 2 and len(means[0][0]) and len(means[1][0]):
+            ax.plot(tax, means[0][0].mean(0) - means[1][0].mean(0), color="k", lw=0.9,
+                    label="difference")
+        ax.axhline(0, color="k", lw=0.3)
+        for x, lab in marks:
+            ax.axvline(x, color="k", lw=0.8, ls="--" if lab else "-")
+        if shade_rp:
+            ax.axvspan(*RP_WINDOW_MS, color="gold", alpha=0.18)
+        if rug is not None and len(rug):
+            y0 = ax.get_ylim()[0] if not (r["clean"] and shared) else -shared
+            ax.plot(rug, np.full(len(rug), y0), "|", color="#6a1b9a", ms=6, alpha=0.6)
+        if r["clean"] and shared:
+            ax.set_ylim(-shared, shared)
+        ax.tick_params(labelsize=7)
+        c = r["c"]
+        if c in stats:
+            tag = "%+.1f µV p=%.3f" % (stats[c]["mean"], stats[c]["p"])
+        elif r["clean"]:
+            tag = "clean %.0f µV" % r["noise"]
+        else:
+            tag = "noisy %.0f µV — own scale" % r["noise"]
+        ax.set_ylabel("%s\n%s" % (c, tag), rotation=0, ha="right", va="center", fontsize=8,
+                      color="k" if r["clean"] else "0.55",
+                      fontweight="bold" if (c in stats and stats[c]["p"] < 0.05) else "normal")
+        if not r["clean"]:
+            ax.set_facecolor("#f4f4f4")
+    axes[0, 0].legend(fontsize=7, loc="upper right", ncol=4)
+    for x, lab in marks:
+        if lab:
+            axes[0, 0].annotate(lab, (x, 1), xycoords=("data", "axes fraction"), xytext=(3, 3),
+                                textcoords="offset points", fontsize=8)
+    axes[-1, 0].set_xlabel(xlabel)
+    axes[-1, 0].set_xlim(*window_ms)
+    fig.suptitle("Trial #%d — %s%s" % (pk, title, "; clean electrodes share one scale (±%.0f µV)"
+                                          % shared if shared else ""), fontsize=10)
+    fig.tight_layout(rect=(0.06, 0, 1, 0.97))
+    return render(fig, hi_dpi=100)
+
+
+def press_locked_peak(Ek, tk, expected_ms, polarity, half_width=100, n_boot=1000, seed=0):
+    """
+    Where the RP peaks in a keypress-locked average.  Reaction times vary, so
+    the image-locked RP is smeared and lands at a slightly different place on
+    each channel; there is no exact conversion from image time.  So it is
+    measured in this average itself: the peak of the RP's polarity within
+    ±half_width ms of where the image-locked latency puts it (median image time
+    + latency), bootstrapped over the key presses.  None if no real peak.
+    """
+    sign = 1.0 if polarity == "positive" else -1.0
+    m = (tk >= expected_ms - half_width) & (tk <= expected_ms + half_width)
+    ts, X = tk[m], Ek[:, m]
+
+    def peak(d):
+        k = int(np.argmax(sign * d))
+        return float(ts[k]) if 0 < k < len(ts) - 1 else np.nan
+
+    observed = peak(X.mean(0))
+    if np.isnan(observed):
+        return None
+    rng = np.random.default_rng(seed)
+    boots = np.array([peak(X[rng.integers(0, len(X), len(X))].mean(0)) for _ in range(n_boot)])
+    ok = boots[~np.isnan(boots)]
+    if len(ok) < n_boot / 2:
+        return None
+    lo, hi = np.percentile(ok, [2.5, 97.5])
+    return {"peak_ms": observed, "boot_median_ms": float(np.median(ok)),
+            "ci_low_ms": float(lo), "ci_high_ms": float(hi), "n": int(len(X))}
+
+
+def keypress_figure(pk, filtered, kp_chans, fs, press_times, rts, median_rt, stats, noise):
+    """
+    Keypress-locked averages, one panel per electrode, reaching back past the
+    earliest possible image.  Marks the key press, the median image
+    presentation, each image presentation, and — where measured — the RP:
+    median image→RP latency placed after the median image presentation, with
+    its 95% CI as error bars.
+    """
+    win = (-(MAX_REACTION_MS + 200), 400)          # before the earliest possible image
+    bl = (win[0], -MAX_REACTION_MS)
+    img_x = -median_rt
+    fig, axes = plt.subplots(len(kp_chans), 1, figsize=(16, 1.0 + 2.1 * len(kp_chans)),
+                             sharex=True, squeeze=False)
+    axes = axes[:, 0]
+    for ax, c in zip(axes, kp_chans):
+        Ek, tk, _ = extract_epochs(filtered[c], fs, press_times, window_ms=win, baseline_ms=bl)
+        note = ""
+        if len(Ek) < 5:   # not connected: every epoch fails rejection — show it unrejected
+            Ek, tk, _ = extract_epochs(filtered[c], fs, press_times, window_ms=win, baseline_ms=bl,
+                                       reject_uv=np.inf)
+            note = " — no epochs pass the %g µV rejection; average without rejection" % REJECT_UV
+        connected = noise.get(c, np.inf) < CONNECTED_MAX_UV
+        color = "#2F5BEA" if connected else "#8796A0"
+        if len(Ek):
+            ax.plot(tk, Ek.mean(0), lw=1.4, color=color)
+        ax.axhline(0, color="k", lw=0.4)
+        ax.axvline(0, color="k", lw=0.9)
+        ax.axvline(img_x, color="#c0392b", lw=1.2, ls="--")
+        ax.text(0.003, 0.95, "%s  n=%d  (noise %.0f µV%s)%s" % (
+                    c, len(Ek), noise.get(c, float("nan")), "" if connected else ", not connected", note),
+                transform=ax.transAxes, va="top", fontsize=9, weight="bold",
+                color="#1D2A33" if connected else "#5C6B75")
+        ax.set_ylabel("µV")
+        L = stats.get(c, {}).get("latency")
+        P = press_locked_peak(Ek, tk, img_x + L["peak_ms"], L["polarity"]) if L and len(Ek) >= 5 else None
+        if P:
+            stats[c]["latency"]["press_locked"] = P
+            x = P["peak_ms"]
+            lo, hi = ax.get_ylim()
+            yy = hi - 0.12 * (hi - lo)
+            ax.errorbar([x], [yy], xerr=[[max(0, x - P["ci_low_ms"])], [max(0, P["ci_high_ms"] - x)]],
+                        fmt="v" if L["polarity"] == "negative" else "^", color="#C2185B", ms=8,
+                        capsize=5, lw=1.6, zorder=5)
+            ax.axvline(x, color="#C2185B", lw=0.8, ls=":")
+            ann = ax.annotate("RP %.0f ms before the press (95%% CI %.0f–%.0f)\n%.0f ms after the "
+                              "image (95%% CI %.0f–%.0f)" % (-x, -P["ci_high_ms"], -P["ci_low_ms"],
+                                                            L["peak_ms"], L["ci_low_ms"], L["ci_high_ms"]),
+                              (x, yy), xytext=(10, -4), textcoords="offset points", fontsize=8.5,
+                              color="#C2185B", va="top")
+            ann.set_in_layout(False)
+        elif L:
+            ax.text(0.997, 0.95, "RP %.0f ms after the image; no matching peak in this average"
+                    % L["peak_ms"], transform=ax.transAxes, ha="right", va="top", fontsize=8.5,
+                    color="#C2185B")
+    ax = axes[0]
+    ax.annotate("key press", (0, 1), xycoords=("data", "axes fraction"), xytext=(4, 4),
+                textcoords="offset points", fontsize=9)
+    ax.annotate("image presented (median, %.0f ms before)" % median_rt, (img_x, 1),
+                xycoords=("data", "axes fraction"), xytext=(4, 4),
+                textcoords="offset points", fontsize=9, color="#c0392b")
+    ax = axes[-1]
+    y0 = ax.get_ylim()[0]
+    ax.plot(-np.asarray(rts), np.full(len(rts), y0), "|", color="#c0392b", ms=9, alpha=0.6)
+    ax.set_xlim(*win)
+    ax.set_xlabel("ms relative to key press   (red ticks: each image presentation; "
+                  "pink: RP peak in this average, bars = 95% CI)")
+    fig.suptitle("Trial #%d — keypress-locked average, back to image presentation (baseline before "
+                 "the earliest image)" % pk, fontsize=12, x=0.01, ha="left")
+    fig.tight_layout()
+    return render(fig, hi_dpi=100 if len(kp_chans) > 4 else 150)
+
+
 def no_sync_result(trial, signals, labels, fs, al, log):
     """Result for a trial whose sync inputs show no screen changes: no usable data."""
     pk, clear = trial["pk"], trial["clear"]
@@ -487,9 +1065,10 @@ def no_sync_result(trial, signals, labels, fs, al, log):
     fig.tight_layout()
     images, hires = {}, {}
     images["alignment"], hires["alignment"] = render(fig)
-    for name, title in (("erp", "ERPs clear vs scrambled"), ("difference", "difference wave"),
-                        ("keypress", "keypress-locked average")):
-        images[name], hires[name] = placeholder(pk, title, reason)
+    images["sync"], hires["sync"] = images["alignment"], hires["alignment"]
+    for name, _field, title, _note in IMAGES:
+        if name not in images:
+            images[name], hires[name] = placeholder(pk, title.lower(), reason)
     summary = {
         "pk": pk, "subject": trial["subject"], "timestamp": trial["timestamp"],
         "dataset": trial["meta"].get("dataset", "?"),
@@ -503,8 +1082,9 @@ def no_sync_result(trial, signals, labels, fs, al, log):
                    "rp_window_ms": RP_WINDOW_MS, "peak_search_ms": PEAK_SEARCH_MS,
                    "reject_uv": REJECT_UV, "connected_max_uv": CONNECTED_MAX_UV},
         "edf": trial["edf"].rsplit("/", 1)[-1],
-        "n_images": int(len(trial["stim_ms"])), "n_clear": int(clear.sum()),
-        "n_scrambled": int((~clear).sum()), "n_presses": int(len(trial["presses_ms"])),
+        "n_images": int(len(trial["stim_ms"]) - extra_image(trial)),
+        "n_clear": int(clear[:len(clear) - extra_image(trial)].sum()),
+        "n_scrambled": int((~clear[:len(clear) - extra_image(trial)]).sum()), "n_presses": int(len(trial["presses_ms"])),
         "used_channels": [], "alignment_detail": al["method"],
         "warnings": report_warnings(al, {}),
     }
@@ -528,8 +1108,10 @@ def analyze(trial, photodiode=None, channels=None, log=None):
     signals, signal_headers, header = highlevel.read_edf(trial["edf"])
     labels = [h["label"] for h in signal_headers]
     fs = float(signal_headers[0]["sample_frequency"])
-    log("  %.0f Hz, %.0f s; %d images (%d clear, %d scrambled); %d presses"
-        % (fs, signals.shape[1] / fs, len(stim_ms), clear.sum(), (~clear).sum(),
+    log("  %.0f Hz, %.0f s; %d images logged%s; %d presses"
+        % (fs, signals.shape[1] / fs, len(stim_ms),
+           " (%d requested — the last is not counted)" % trial["total_images"]
+           if extra_image(trial) else " (%d clear, %d scrambled)" % (clear.sum(), (~clear).sum()),
            len(trial["presses_ms"])))
 
     # --- Alignment ----------------------------------------------------------
@@ -538,6 +1120,14 @@ def analyze(trial, photodiode=None, channels=None, log=None):
     if not al["ok"]:
         return no_sync_result(trial, signals, labels, fs, al, log)
     presses = clock_map(trial["presses_ms"])
+    dropped = None
+    if extra_image(trial):
+        dropped = float(onsets[-1])
+        onsets, stim_ms, clear = onsets[:-1], stim_ms[:-1], clear[:-1]
+        log("    image %d (one more than the %d requested) is not counted" % (len(stim_ms) + 1, len(stim_ms)))
+    al["dropped_onset"] = dropped
+    al["image_sync_pulses"] = count_image_pulses(al["trace"], fs, onsets)
+    log("    image sync pulses counted: %d for %d images" % (al["image_sync_pulses"], len(stim_ms)))
     if al["ok"]:
         log("    offset %.0f ms (EDF header says %.0f); %.0f%% of images matched "
             "(typical %.0f%%); drift %.0f ppm; jitter %.1f ms"
@@ -546,6 +1136,7 @@ def analyze(trial, photodiode=None, channels=None, log=None):
         if al.get("peak_lag_ms") is not None:
             log("    flips timed at the change of state (%.0f%% refined); spike peaks lag it by %.1f ms"
                 % (100 * al["refined_frac"], al["peak_lag_ms"]))
+        log("    " + anchor_text(al))
 
     # --- Connected electrodes ----------------------------------------------
     filtered, noise = {}, {}
@@ -561,12 +1152,13 @@ def analyze(trial, photodiode=None, channels=None, log=None):
     log("  using: %s" % (", ".join(use) or "NONE"))
 
     # --- Behaviour ----------------------------------------------------------
-    rts, press_for_clear = [], []
+    rts, press_for_clear, clear_pressed = [], [], []
     for t in onsets[clear]:
         cand = presses[(presses > t + MIN_REACTION_MS) & (presses < t + MAX_REACTION_MS)]
         if len(cand):
             rts.append(cand[0] - t)
             press_for_clear.append(cand[0])
+            clear_pressed.append(t)
     rts = np.array(rts)
     median_rt = float(np.median(rts)) if len(rts) else float("nan")
     log("  %d of %d clear images followed by a keypress (median RT %.0f ms)"
@@ -595,6 +1187,19 @@ def analyze(trial, photodiode=None, channels=None, log=None):
             % (c, RP_WINDOW_MS[0], RP_WINDOW_MS[1], obs, p,
                stats[c]["peak_uv"], stats[c]["peak_ms"]))
     chans = list(stats)
+    # one polarity for the trial: the best channel's RP-window difference
+    if chans:
+        best_c = min(chans, key=lambda c: stats[c]["p"])
+        rp_sign = 1.0 if stats[best_c]["mean"] >= 0 else -1.0
+        log("  RP polarity: %s (from %s)" % ("positive" if rp_sign > 0 else "negative", best_c))
+    for c in chans:
+        stats[c]["latency"] = rp_latency(E_clear[c], E_scr[c], tax, rp_sign)
+        L = stats[c]["latency"]
+        if L:
+            log("  %s: image→RP latency %.0f ms (peak of the average; bootstrap 95%% CI %.0f–%.0f)"
+                % (c, L["peak_ms"], L["ci_low_ms"], L["ci_high_ms"]))
+        else:
+            log("  %s: no RP peak inside %d–%d ms" % ((c,) + tuple(PEAK_SEARCH_MS)))
 
     status = ("no connected electrodes" if not chans else
               "weak alignment (%.0f%% matched)" % (100 * al["match"])
@@ -656,25 +1261,60 @@ def analyze(trial, photodiode=None, channels=None, log=None):
     fig.tight_layout()
     images["alignment"], hires["alignment"] = render(fig)
 
-    if chans:
-        # IMAGE: ERPs per channel  -> periStimulusAverage
-        ncol = 2 if len(chans) > 1 else 1
-        nrow = int(np.ceil(len(chans) / ncol))
-        fig, axes = plt.subplots(nrow, ncol, figsize=(16, 4.5 * nrow), sharex=True, squeeze=False)
-        for ax in axes.flat[len(chans):]:
-            ax.axis("off")
-        for ax, c in zip(axes.flat, chans):
-            shade_mean(ax, tax, E_clear[c], COLORS["clear"], "clear (target)")
-            shade_mean(ax, tax, E_scr[c], COLORS["scr"], "scrambled")
-            decorate(ax)
-            ax.set_title("%s   (clear − scrambled %d–%d ms: %+.1f µV, p=%.3f)"
-                         % (c, RP_WINDOW_MS[0], RP_WINDOW_MS[1],
-                            stats[c]["mean"], stats[c]["p"]))
-        fig.suptitle("Trial #%d — ERPs clear vs scrambled, %g–%g Hz, ±2 SE shaded; status: %s"
-                     % (pk, BANDPASS[0], BANDPASS[1], status))
-        fig.tight_layout()
-        images["erp"], hires["erp"] = render(fig)
+    # IMAGE: proof of sync  -> syncProof
+    images["sync"], hires["sync"] = sync_proof_figure(pk, al["trace"], fs, al, onsets, trial)
 
+    # stacked all-electrode figures (each electrode filtered once, shared)
+    rows = electrode_rows(signals, labels, fs, al.get("members", ()))
+    on_c, on_s = onsets[clear], onsets[~clear]
+    images["comparison"], hires["comparison"] = stacked_figure(
+        pk, rows, fs, [(on_c, COLORS["clear"], "clear"), (on_s, COLORS["scr"], "scrambled")],
+        "clear vs scrambled, every electrode (RP window shaded); status: %s" % status,
+        diff=True, stats=stats, marks=[(0, "")])
+    # --- the original four figures (as designed in the legacy command) ------
+    L = LEGACY_OFFSET_MS
+    images["clear"], hires["clear"] = legacy_figure(
+        pk, signals, labels, fs, on_c, L, L,
+        "Trial #%d, peri-stimulus averages over time, averaged across %d stimuli and %d "
+        "non-stimuli" % (pk, len(on_c), len(on_s)), "peri-stimulus average", marks=[(0, "")])
+    images["scrambled"], hires["scrambled"] = legacy_figure(
+        pk, signals, labels, fs, on_s, L, L,
+        "Trial #%d, peri-non-stimulus average over time, averaged across %d non-stimuli"
+        % (pk, len(on_s)), "peri-non-stimulus average", marks=[(0, "")])
+    # keypresses that came within promptDelay of a clear image (the original filteredImages)
+    prompt_presses = []
+    for t in on_c:
+        cand = presses[(presses > t) & (presses < t + LEGACY_PROMPT_MS)]
+        if len(cand):
+            prompt_presses.append(cand[0])
+    # clear images with a keypress 200-1000 ms later (the original associatedKeypresses)
+    assoc = [(t, p) for t, p in zip(clear_pressed, press_for_clear) if p - t < LEGACY_PROMPT_MS]
+    if prompt_presses:
+        images["clear_pressed"], hires["clear_pressed"] = legacy_figure(
+            pk, signals, labels, fs, np.array(prompt_presses), L, L,
+            "Trial #%d, filtered peri-stimulus averages over time, around %d key presses made "
+            "within %d ms of a clear image" % (pk, len(prompt_presses), LEGACY_PROMPT_MS),
+            "filtered peri-stimulus average", xlabel="ms before/after key press",
+            marks=[(0, "key press")])
+    else:
+        images["clear_pressed"], hires["clear_pressed"] = placeholder(
+            pk, "filtered peri-stimulus average", "No key press followed a clear image")
+    if assoc:
+        img_t = np.array([t for t, p in assoc]); prs = np.array([p for t, p in assoc])
+        rt_a = prs - img_t
+        images["prompt"], hires["prompt"] = legacy_figure(
+            pk, signals, labels, fs, prs, LEGACY_PROMPT_MS + 100, 300,
+            "Trial #%d, filtered peri-prompt-stimulus averages over time, averaged across %d "
+            "prompt (within %d ms of presentation) presses — locked to the key press, back to "
+            "image presentation" % (pk, len(prs), LEGACY_PROMPT_MS),
+            "filtered peri-prompt-stimulus average", xlabel="ms before/after key press",
+            marks=[(0, "key press"), (-float(np.median(rt_a)), "image presentation (median)")],
+            rug=-rt_a)
+    else:
+        images["prompt"], hires["prompt"] = placeholder(
+            pk, "filtered peri-prompt-stimulus average", "No prompt key press after a clear image")
+
+    if chans:
         # IMAGE: difference waves  -> filteredPeriStimulusAverage
         fig, ax = plt.subplots(figsize=(16, 4.5))
         for c in chans:
@@ -683,31 +1323,18 @@ def analyze(trial, photodiode=None, channels=None, log=None):
         ax.set_title("Trial #%d — difference wave: clear − scrambled (RP window shaded)" % pk)
         fig.tight_layout()
         images["difference"], hires["difference"] = render(fig)
-
-        # IMAGE: keypress-locked  -> filteredPeriPromptStimulusAverage
-        if press_for_clear:
-            fig, ax = plt.subplots(figsize=(16, 4.5))
-            for c in chans:
-                Ek, tk, _ = extract_epochs(filtered[c], fs, press_for_clear,
-                                           window_ms=(-800, 400), baseline_ms=(-800, -600))
-                if len(Ek):
-                    ax.plot(tk, Ek.mean(0), lw=1.4, label="%s (n=%d)" % (c, len(Ek)))
-            ax.axvline(0, color="k", lw=0.8)
-            ax.axhline(0, color="k", lw=0.4)
-            ax.set_xlabel("ms relative to keypress")
-            ax.set_ylabel("µV")
-            ax.legend(fontsize=8, loc="upper left")
-            ax.set_title("Trial #%d — keypress-locked average (median RT %.0f ms); a response "
-                         "driven by the press peaks near 0" % (pk, median_rt))
-            fig.tight_layout()
-            images["keypress"], hires["keypress"] = render(fig)
-        else:
-            images["keypress"], hires["keypress"] = placeholder(pk, "keypress-locked average",
-                                             "No keypresses followed a clear image")
     else:
-        images["erp"], hires["erp"] = placeholder(pk, "ERPs clear vs scrambled", no_erp)
         images["difference"], hires["difference"] = placeholder(pk, "difference wave", no_erp)
-        images["keypress"], hires["keypress"] = placeholder(pk, "keypress-locked average", no_erp)
+
+    # IMAGE: keypress-locked, reaching back to image presentation  -> keypressLockedAverage
+    kp_chans = [c for c in KEYPRESS_SHOW if c in filtered] + [c for c in chans if c not in KEYPRESS_SHOW]
+    if press_for_clear and kp_chans:
+        images["keypress"], hires["keypress"] = keypress_figure(
+            pk, filtered, kp_chans, fs, press_for_clear, rts, median_rt, stats, noise)
+    else:
+        images["keypress"], hires["keypress"] = placeholder(
+            pk, "keypress-locked average",
+            "No keypresses followed a clear image" if kp_chans else no_erp)
 
     best = min(stats.items(), key=lambda kv: kv[1]["p"]) if stats else None
     summary = {
@@ -717,6 +1344,12 @@ def analyze(trial, photodiode=None, channels=None, log=None):
         "alignment_match": float(al["match"]) if al["ok"] else None,
         "sync_channel": al.get("channel"), "sync_members": list(al.get("members", ())),
         "sync_peak_lag_ms": al.get("peak_lag_ms"),
+        "calibration_anchor": bool(al.get("anchored")),
+        "calibration": ({k: v for k, v in al["calibration"].items()} if al.get("calibration") else None),
+        "calibration_crosscheck_ms": al.get("crosscheck_ms"),
+        "image_sync_pulses": al.get("image_sync_pulses"),
+        "end_anchor": al.get("end_anchor"),
+        "end_vs_burst_ms": al.get("end_vs_burst_ms"),
         "electrode_noise_uv": noise,
         "channels": chans,
         "stats": {c: {k: v for k, v in s.items() if k != "diff"} for c, s in stats.items()},
@@ -725,6 +1358,9 @@ def analyze(trial, photodiode=None, channels=None, log=None):
         "best_p": best[1]["p"] if best else None,
         "best_mean_uv": best[1]["mean"] if best else None,
         "best_peak_ms": best[1]["peak_ms"] if best else None,
+        # the key number: image->RP latency on the best channel
+        "rp_latency": (dict(best[1]["latency"], channel=best[0])
+                       if best and best[1].get("latency") else None),
         "status": status,
         "config": {"bandpass_hz": BANDPASS, "epoch_ms": EPOCH_MS, "baseline_ms": BASELINE_MS,
                    "rp_window_ms": RP_WINDOW_MS, "peak_search_ms": PEAK_SEARCH_MS, "reject_uv": REJECT_UV,
@@ -746,15 +1382,44 @@ def analyze(trial, photodiode=None, channels=None, log=None):
 # ---------------------------------------------------------------------------
 # Report (PDF)
 # ---------------------------------------------------------------------------
+def anchor_text(al):
+    """One sentence on how image 1 was pinned down, and the cross-checks."""
+    cal, end = al.get("calibration"), al.get("end_anchor")
+    if not cal and not end:
+        return ("No calibration burst or clean end of the image train — alignment from the image "
+                "flips only, which can lock on one image early or late")
+    x = al.get("crosscheck_ms")
+    shift = round(x / 316.0) if x is not None else 0
+    verdict = ("image flips alone would have been %+.0f ms off (%+d image%s) — corrected"
+               % (x, shift, "" if abs(shift) == 1 else "s") if abs(x) > 150 else
+               "image flips alone agree within %.0f ms" % abs(x))
+    if cal:
+        txt = ("Anchored on the calibration burst (%d flips at %.0f ms; %s%s; first 10 images within "
+               "%.0f ms, median %+.0f ms)"
+               % (cal["n_flips"], cal["half_period_ms"], cal["how"],
+                  ", spread %.1f ms" % cal["fit_spread_ms"] if cal.get("fit_spread_ms") is not None else "",
+                  CAL_FIRST_IMAGE_TOL, cal["first_image_err_ms"] or 0.0))
+        if end:
+            d = al["end_vs_burst_ms"]
+            txt += ("; the end of the image train agrees (%+.0f ms)" % d if abs(d) < 150 else
+                    "; the end of the image train DISAGREES by %+.0f ms" % d)
+        else:
+            txt += "; no clean end of the image train to cross-check"
+    else:
+        txt = ("No usable calibration burst; anchored on the end of the image train (last flip = "
+               "last image; last 10 images matched %.0f%%)" % (100 * end["last_images_matched"]))
+    return txt + "; " + verdict
+
+
 def alignment_text(al, n_images):
     if not al["ok"]:
         return al["method"]
     lag = ("; peaks lag the change of state by %.1f ms" % al["peak_lag_ms"]
            if al.get("peak_lag_ms") is not None else "")
-    return ("%s; clock offset %.0f ms (EDF header would give %.0f ms); %d/%d images matched; "
+    return ("%s; %s; clock offset %.0f ms (EDF header would give %.0f ms); %d/%d images matched; "
             "drift %.0f ppm; jitter %.1f ms%s"
-            % (al["method"], al["offset_ms"], al["header_offset_ms"], al["n_matched"],
-               n_images, al["drift_ppm"], al["residuals_ms"].std(), lag))
+            % (al["method"], anchor_text(al), al["offset_ms"], al["header_offset_ms"],
+               al["n_matched"], n_images, al["drift_ppm"], al["residuals_ms"].std(), lag))
 
 
 def report_warnings(al, stats):
@@ -763,6 +1428,13 @@ def report_warnings(al, stats):
         warn.append("No sync signal: none of the sync inputs recorded the screen changing, so the "
                     "image onsets can't be located in the EEG. This trial has no usable data.")
         return warn
+    if al["ok"] and not (al.get("calibration") or al.get("end_anchor")):
+        warn.append(anchor_text(al) + ". Without the calibration anchor a one-image shift "
+                    "(~316 ms) cannot be ruled out; treat these averages with caution.")
+    if al["ok"] and al.get("end_vs_burst_ms") is not None and abs(al["end_vs_burst_ms"]) > 150:
+        warn.append("The calibration burst and the end of the image train disagree by %+.0f ms "
+                    "about which flip is which; the burst was used. Check the alignment plot."
+                    % al["end_vs_burst_ms"])
     if al["ok"] and al["match"] < PHOTODIODE_GOOD_MATCH:
         warn.append("Only %.0f%% of images matched a photodiode spike on %s, so the alignment "
                     "may be wrong. Check the alignment plot before trusting these averages."
@@ -811,6 +1483,14 @@ def build_pdf(s, hires, log_text):
             ("Stimuli", "%d images: %d clear, %d scrambled   •   %d keypresses (%d matched to clear "
                         "images, %s)" % (s["n_images"], s["n_clear"], s["n_scrambled"],
                                          s["n_presses"], s["n_clear_with_press"], rt)),
+            ("RP latency", ("%.0f ms from image presentation to the RP on %s (95%% CI "
+                            "%.0f–%.0f ms): peak of the clear − scrambled average within %d–%d ms, "
+                            "bootstrapped over %d clear and %d scrambled images" % (
+                                s["rp_latency"]["peak_ms"], s["rp_latency"]["channel"],
+                                s["rp_latency"]["ci_low_ms"], s["rp_latency"]["ci_high_ms"],
+                                PEAK_SEARCH_MS[0], PEAK_SEARCH_MS[1],
+                                s["rp_latency"]["n"], s["rp_latency"]["n_scrambled"]))
+                           if s.get("rp_latency") else "not measured"),
             ("EDF file", s["edf"]),
             ("Alignment", s["alignment_detail"]),
             ("Electrodes", "noise after filtering — " + ", ".join(
@@ -864,10 +1544,15 @@ def build_pdf(s, hires, log_text):
 
         # --- one page per plot -------------------------------------------------
         for name, _field, title, note in IMAGES:
-            img = plt.imread(io.BytesIO(hires[name]), format="png")
-            fig = plt.figure(figsize=PAGE)
+            if name not in hires:
+                continue
+            from PIL import Image
+            img = np.asarray(Image.open(io.BytesIO(hires[name])).convert("RGB"))  # uint8: 1/4 of float
+            tall = img.shape[0] > 0.9 * img.shape[1]
+            fig = plt.figure(figsize=(PAGE[1], PAGE[0]) if tall else PAGE)
             fig.text(0.05, 0.95, title, fontsize=15, weight="bold", va="top")
-            y = _wrap(fig, 0.05, 0.905, note, 150, 0.026, fontsize=9.5, color="#555")
+            y = _wrap(fig, 0.05, 0.92 if tall else 0.905, note, 105 if tall else 150,
+                      0.02 if tall else 0.026, fontsize=9.5, color="#555")
             top = y - 0.01
             ax = fig.add_axes([0.03, 0.06, 0.94, top - 0.06])
             ax.imshow(img, interpolation="antialiased")

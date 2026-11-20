@@ -1,3 +1,5 @@
+import json
+
 from django.contrib import admin, messages
 from django.http import HttpResponseRedirect
 from django.urls import reverse
@@ -7,7 +9,7 @@ from django.utils.safestring import mark_safe
 from Analysis.labels import IMAGES, WINDOW_TEXT, PEAK_SEARCH_MS
 from Analysis.runner import run_analysis
 from Analysis.summary import load_summary, status_of
-from .models import Subject, Trial
+from .models import Subject, Tag, Trial
 
 admin.site.site_header = "EEG Data"
 admin.site.site_title = "EEG Data admin"
@@ -29,18 +31,39 @@ class SubjectAdmin(admin.ModelAdmin):
         return obj.trial_set.count()
 
 
+@admin.register(Tag)
+class TagAdmin(admin.ModelAdmin):
+    list_display = ("name", "slug", "category", "automatic", "trial_count", "description")
+    list_filter = ("category", "automatic")
+    search_fields = ("name", "slug", "description")
+    prepopulated_fields = {"slug": ("name",)}
+
+    @admin.display(description="Trials")
+    def trial_count(self, obj):
+        return obj.trials.count()
+
+
+def tag_chips(trial):
+    return format_html_join(" ", '<span class="eeg-tag eeg-tag-{}" title="{}">{}</span>',
+                            ((t.category, t.description, t.name) for t in trial.tags.all()))
+
+
 @admin.register(Trial)
 class TrialAdmin(admin.ModelAdmin):
     list_display = ("id", "subject", "trialTimestamp", "has_edf", "analysis_status",
-                    "best_result", "report_link")
+                    "rp_latency", "sync_pulses", "best_result", "tag_list", "report_link")
     list_display_links = ("id", "trialTimestamp")
-    list_filter = ("analysisError", "analysisStarted", "subject", "dataset")
+    list_filter = ("tags", "analysisError", "analysisStarted", "subject", "dataset")
+    filter_horizontal = ("tags",)
     search_fields = ("id", "subject__subjectId", "trialTimestamp")
     list_per_page = 50
     actions = ["rerun_analysis"]
     readonly_fields = ("analysis_results", "timestamp")
     fieldsets = (
         ("Analysis results", {"fields": ("analysis_results",)}),
+        ("Tags", {"fields": ("tags",),
+                  "description": "Automatic tags are refreshed by every analysis run; tags you "
+                                 "add by hand are kept."}),
         ("Data files", {
             "fields": ("edfFile", "layFile", "statFile", "EDFStartTime"),
             "description": "Uploading a new EDF file runs the analysis automatically when you "
@@ -59,7 +82,12 @@ class TrialAdmin(admin.ModelAdmin):
                                                "periStimulusAverage",
                                                "filteredPeriStimulusAverage",
                                                "filteredPeriPromptStimulusAverage",
-                                               "periNonStimulusAverage", "analysisData",
+                                               "periNonStimulusAverage", "syncProof",
+                                               "clearVsScrambled", "differenceWave",
+                                               "keypressLockedAverage", "alignmentCheck",
+                                               "imageSyncPulses", "rpLatencyMs",
+                                               "rpLatencyCiLowMs", "rpLatencyCiHighMs",
+                                               "rpLatencyChannel", "analysisData",
                                                "analysisReport", "analysisOutput")}),
     )
 
@@ -79,6 +107,33 @@ class TrialAdmin(admin.ModelAdmin):
             return "—"
         txt = "%s %+.1f µV, p=%.3f" % (s["best_channel"], s["best_mean_uv"], s["best_p"])
         return format_html("<b>{}</b>", txt) if s["best_p"] < 0.05 else txt
+
+    @admin.display(description="Image sync pulses")
+    def sync_pulses(self, obj):
+        if obj.imageSyncPulses is None:
+            return "—"
+        n = obj.totalImages
+        try:
+            d = json.loads(obj.trialData)["data"]
+            n = sum(1 for k in d if k.isdigit())
+        except (ValueError, KeyError, TypeError):
+            pass
+        return "%d / %s" % (obj.imageSyncPulses, n)
+
+    @admin.display(description="RP latency", ordering="rpLatencyMs")
+    def rp_latency(self, obj):
+        if obj.rpLatencyMs is None:
+            return "—"
+        return format_html("<b>{} ms</b> <small>({}–{}, {})</small>", "%.0f" % obj.rpLatencyMs,
+                           "%.0f" % obj.rpLatencyCiLowMs, "%.0f" % obj.rpLatencyCiHighMs,
+                           obj.rpLatencyChannel)
+
+    @admin.display(description="Tags")
+    def tag_list(self, obj):
+        return tag_chips(obj) or "—"
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related("tags")
 
     @admin.display(description="Report")
     def report_link(self, obj):
@@ -102,6 +157,9 @@ class TrialAdmin(admin.ModelAdmin):
         parts.append(format_html(' <a href="{}" target="_blank">EDF viewer</a>',
                                  "/edfviewer/%d" % obj.pk))
         parts.append(mark_safe("</div>"))
+        chips = tag_chips(obj)
+        if chips:
+            parts.append(format_html('<p class="eeg-tags">{}</p>', chips))
         if obj.analysisError:
             parts.append(format_html('<pre class="eeg-log eeg-log-error">{}</pre>', obj.analysisOutput))
         elif s and "n_images" in s:
@@ -144,8 +202,10 @@ class TrialAdmin(admin.ModelAdmin):
         return mark_safe("".join(str(p) for p in parts))
 
     # --- automatic processing on upload --------------------------------------
-    def save_model(self, request, obj, form, change):
-        super().save_model(request, obj, form, change)
+    def save_related(self, request, form, formsets, change):
+        # after the form's tags are written, so the analysis' automatic tags win
+        super().save_related(request, form, formsets, change)
+        obj = form.instance
         if "edfFile" in form.changed_data and obj.edfFile:
             self._analyse(request, obj)
 

@@ -29,6 +29,8 @@ from django.core.files.base import ContentFile
 from django.core.management.base import BaseCommand
 
 from Analysis import erp
+from Analysis.labels import IMAGES
+from Analysis.tags import apply_tags
 from Trial.models import Trial
 
 
@@ -123,12 +125,7 @@ class Command(BaseCommand):
         with open(os.path.join(out, "trial%d-report.pdf" % pk), "wb") as f:
             f.write(result["pdf"])
 
-    IMAGE_TITLES = [
-        ("periStimulusAverage", "ERPs: clear vs scrambled"),
-        ("filteredPeriStimulusAverage", "Difference wave (clear − scrambled)"),
-        ("filteredPeriPromptStimulusAverage", "Keypress-locked average"),
-        ("periNonStimulusAverage", "Alignment check + signal overview"),
-    ]
+    IMAGE_TITLES = [(field, title) for _n, field, title, _note in IMAGES]
 
     def write_index(self, out):
         """index.html covering every trial<ID>.log in the output folder."""
@@ -192,6 +189,7 @@ Generated %s.</p>
         trial.analysisData.save("trial%d-summary.json" % trial.pk,
                                 ContentFile(json.dumps(result["summary"], indent=1)), save=False)
         trial.save(update_fields=["analysisReport", "analysisData"])
+        apply_tags(trial, result["summary"])
         print("  saved report for trial #%d: %s" % (trial.pk, trial.analysisReport.name))
 
     def save_to_model(self, trial, result, log_text):
@@ -211,7 +209,17 @@ Generated %s.</p>
             trial.analysisReport.save("trial%d-report.pdf" % trial.pk,
                                       ContentFile(result["pdf"]), save=False)
             fields += ["analysisData", "analysisReport"]
+            trial.imageSyncPulses = result["summary"].get("image_sync_pulses")
+            L = result["summary"].get("rp_latency") or {}
+            trial.rpLatencyMs = L.get("peak_ms")
+            trial.rpLatencyCiLowMs = L.get("ci_low_ms")
+            trial.rpLatencyCiHighMs = L.get("ci_high_ms")
+            trial.rpLatencyChannel = L.get("channel", "")
+            fields += ["imageSyncPulses", "rpLatencyMs", "rpLatencyCiLowMs", "rpLatencyCiHighMs",
+                       "rpLatencyChannel"]
         # only the analysis columns — never touches trialData, presses, uploads, etc.
         trial.save(update_fields=fields)
+        tags = apply_tags(trial, result["summary"] if result is not None else None)
+        print("  tags: %s" % (", ".join(tags) or "—"))
         print("  saved trial #%d (%s)" % (trial.pk, "error" if result is None
                                           else result["summary"]["status"]))

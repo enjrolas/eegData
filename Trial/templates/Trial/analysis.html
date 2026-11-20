@@ -27,18 +27,10 @@
     {% if trial.analysisReport %}<a href="{{ trial.analysisReport.url }}">Download PDF report</a>{% endif %}
     <a href="{% url 'analyses' %}">All trials</a>
   </div>
-  {% if trial.periStimulusAverage %}
-  <figure><figcaption>Event-related potentials: clear vs scrambled</figcaption><img src="{{ trial.periStimulusAverage.url }}" alt="ERPs"></figure>
-  {% endif %}
-  {% if trial.filteredPeriStimulusAverage %}
-  <figure><figcaption>Difference wave (clear − scrambled)</figcaption><img src="{{ trial.filteredPeriStimulusAverage.url }}" alt="Difference wave"></figure>
-  {% endif %}
-  {% if trial.filteredPeriPromptStimulusAverage %}
-  <figure><figcaption>Keypress-locked average</figcaption><img src="{{ trial.filteredPeriPromptStimulusAverage.url }}" alt="Keypress-locked average"></figure>
-  {% endif %}
-  {% if trial.periNonStimulusAverage %}
-  <figure><figcaption>Alignment check and signal overview</figcaption><img src="{{ trial.periNonStimulusAverage.url }}" alt="Alignment check"></figure>
-  {% endif %}
+  {% if trial.imageSyncPulses is not None %}<p class="meta">{{ trial.imageSyncPulses }} image sync pulses counted</p>{% endif %}
+  {% for title, url in figures %}
+  <figure><figcaption>{{ title }}</figcaption><a href="{{ url }}"><img src="{{ url }}" alt="{{ title }}"></a></figure>
+  {% endfor %}
   {% if not trial.periStimulusAverage %}<p class="empty">This trial has not been analysed yet.</p>{% endif %}
 </main>
 </body>
