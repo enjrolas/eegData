@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>EDF Viewer — Trial #{{ trial.pk }}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #1a1a2e; color: #e0e0e0; }
+
+    .top-bar {
+      background: #16213e; padding: 10px 20px; display: flex; align-items: center; gap: 20px;
+      border-bottom: 1px solid #0f3460;
+    }
+    .top-bar h1 { font-size: 16px; font-weight: 600; color: #e94560; white-space: nowrap; }
+    .top-bar .info { font-size: 13px; color: #999; }
+
+    .controls {
+      background: #16213e; padding: 10px 20px; display: flex; align-items: center; gap: 16px;
+      flex-wrap: wrap; border-bottom: 1px solid #0f3460;
+    }
+    .controls label { font-size: 12px; color: #aaa; margin-right: 4px; }
+    .controls select, .controls input, .controls button {
+      background: #0f3460; color: #e0e0e0; border: 1px solid #1a4a8a; border-radius: 4px;
+      padding: 4px 8px; font-size: 13px;
+    }
+    .controls button { cursor: pointer; background: #e94560; border-color: #e94560; color: #fff; font-weight: 600; }
+    .controls button:hover { background: #c73652; }
+    .controls button.nav { background: #0f3460; border-color: #1a4a8a; }
+    .controls button.nav:hover { background: #1a4a8a; }
+
+    .main-area { display: flex; height: calc(100vh - 95px); }
+
+    .sidebar {
+      width: 280px; min-width: 280px; background: #16213e; border-right: 1px solid #0f3460;
+      overflow-y: auto; padding: 10px;
+    }
+    .sidebar h3 { font-size: 13px; color: #e94560; margin: 10px 0 6px; text-transform: uppercase; letter-spacing: 1px; }
+    .sidebar h3:first-child { margin-top: 0; }
+
+    .channel-item {
+      display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 3px;
+      font-size: 12px; cursor: pointer;
+    }
+    .channel-item:hover { background: #0f3460; }
+    .channel-item input[type="checkbox"] { accent-color: #e94560; }
+
+    .diff-section { margin-top: 14px; padding-top: 10px; border-top: 1px solid #0f3460; }
+    .diff-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 12px; }
+    .diff-row select { flex: 1; }
+    .diff-list-item {
+      display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 12px;
+      background: #0f3460; border-radius: 3px; margin-bottom: 4px;
+    }
+    .diff-list-item .remove-diff {
+      margin-left: auto; cursor: pointer; color: #e94560; font-weight: bold; font-size: 14px;
+    }
+
+    .viewer-area { flex: 1; position: relative; overflow: hidden; }
+    canvas { display: block; }
+
+    .time-axis {
+      height: 30px; background: #16213e; border-top: 1px solid #0f3460;
+      position: absolute; bottom: 0; left: 0; right: 0;
+    }
+
+    /* ── Premiere-style scrollbar ─────────────────────────────── */
+    .scroll-bar-container {
+      position: absolute; bottom: 30px; left: 0; right: 0; height: 20px;
+      background: #0a0a1a;
+    }
+    .scroll-thumb {
+      position: absolute; top: 2px; height: 16px; background: #e94560;
+      border-radius: 2px; cursor: grab; min-width: 20px;
+    }
+    .scroll-thumb:active { cursor: grabbing; }
+    .scroll-handle {
+      position: absolute; top: 0; width: 8px; height: 100%;
+      cursor: ew-resize; z-index: 2;
+    }
+    .scroll-handle:hover, .scroll-handle:active { background: rgba(255,255,255,0.25); }
+    .scroll-handle.left { left: 0; border-radius: 2px 0 0 2px; }
+    .scroll-handle.right { right: 0; border-radius: 0 2px 2px 0; }
+
+    .loading-overlay {
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(26,26,46,0.85); display: flex; align-items: center;
+      justify-content: center; font-size: 16px; color: #e94560; z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <div class="top-bar">
+    <h1>EDF Viewer</h1>
+    <span class="info">Trial #{{ trial.pk }} — Subject: {{ trial.subject }} — <span id="file-info"></span></span>
+  </div>
+
+  <div class="controls">
+    <div>
+      <label>Amplitude:</label>
+      <select id="amplitude">
+        <option value="1">1 &mu;V</option>
+        <option value="5">5 &mu;V</option>
+        <option value="10">10 &mu;V</option>
+        <option value="25">25 &mu;V</option>
+        <option value="50" selected>50 &mu;V</option>
+        <option value="100">100 &mu;V</option>
+        <option value="200">200 &mu;V</option>
+        <option value="500">500 &mu;V</option>
+        <option value="1000">1000 &mu;V</option>
+      </select>
+    </div>
+    <button class="nav" id="btn-start" title="Go to start">&laquo;</button>
+    <button class="nav" id="btn-prev" title="Previous page">&lsaquo;</button>
+    <span id="time-display" style="font-size:13px; min-width:200px; text-align:center;">0.00 – 10.00 s</span>
+    <button class="nav" id="btn-next" title="Next page">&rsaquo;</button>
+    <button class="nav" id="btn-end" title="Go to end">&raquo;</button>
+    <button class="nav" id="btn-reset-offsets" title="Reset all vertical offsets">Reset Offsets</button>
+  </div>
+
+  <div class="main-area">
+    <div class="sidebar">
+      <h3>Channels</h3>
+      <div id="channel-list"></div>
+
+      <div class="diff-section">
+        <h3>Differential Channels</h3>
+        <div class="diff-row">
+          <select id="diff-ch-a"><option value="">Ch A</option></select>
+          <span>&minus;</span>
+          <select id="diff-ch-b"><option value="">Ch B</option></select>
+          <button id="btn-add-diff" style="padding:2px 8px;">+</button>
+        </div>
+        <div id="diff-list"></div>
+      </div>
+    </div>
+
+    <div class="viewer-area" id="viewer-area">
+      <canvas id="edf-canvas"></canvas>
+      <div class="scroll-bar-container" id="scroll-container">
+        <div class="scroll-thumb" id="scroll-thumb">
+          <div class="scroll-handle left" id="scroll-handle-left"></div>
+          <div class="scroll-handle right" id="scroll-handle-right"></div>
+        </div>
+      </div>
+      <canvas class="time-axis" id="time-canvas"></canvas>
+      <div class="loading-overlay" id="loading" style="display:none;">Loading signal data…</div>
+    </div>
+  </div>
+
+<script>
+(function() {
+  const TRIAL_ID = {{ trial.pk }};
+  const COLORS = [
+    '#00ff88','#ff6b6b','#4ecdc4','#ffe66d','#a29bfe','#fd79a8',
+    '#00cec9','#fab1a0','#74b9ff','#55efc4','#ffeaa7','#dfe6e9',
+    '#ff7675','#81ecec','#fdcb6e','#6c5ce7','#e17055','#00b894',
+  ];
+
+  const MIN_WINDOW = 0.1;   // minimum zoom: 100ms
+  const MAX_WINDOW_FRAC = 1; // maximum zoom: full duration
+
+  let channels = [];
+  let duration = 0;
+  let startTime = 0;
+  let windowLength = 10;
+  let amplitude = 50;
+  let selectedChannels = [];
+  let diffChannels = [];
+
+  let signalStore = {};
+  let traceOffsets = {};
+
+  const canvas = document.getElementById('edf-canvas');
+  const ctx = canvas.getContext('2d');
+  const timeCanvas = document.getElementById('time-canvas');
+  const timeCtx = timeCanvas.getContext('2d');
+  const viewerArea = document.getElementById('viewer-area');
+  const LABEL_WIDTH = 70;
+
+  // ── Init ──────────────────────────────────────────────────────
+  async function init() {
+    const resp = await fetch(`/edfviewer/api/${TRIAL_ID}/channels`);
+    const data = await resp.json();
+    channels = data.channels;
+    duration = data.duration;
+    document.getElementById('file-info').textContent =
+      `${channels.length} channels, ${duration}s, ${channels[0]?.sampleRate || '?'} Hz`;
+
+    buildChannelList();
+    buildDiffSelects();
+
+    const defaultCount = Math.min(4, channels.length);
+    for (let i = 0; i < defaultCount; i++) {
+      selectedChannels.push(i);
+      document.querySelector(`#ch-cb-${i}`).checked = true;
+    }
+
+    await fetchSelectedData();
+  }
+
+  function buildChannelList() {
+    const container = document.getElementById('channel-list');
+    container.innerHTML = '';
+    channels.forEach((ch, i) => {
+      const div = document.createElement('div');
+      div.className = 'channel-item';
+      div.innerHTML = `<input type="checkbox" id="ch-cb-${i}" data-idx="${i}">
+        <span style="color:${COLORS[i % COLORS.length]}">&#9632;</span>
+        <span>${ch.label}</span>`;
+      div.querySelector('input').addEventListener('change', onChannelToggle);
+      container.appendChild(div);
+    });
+  }
+
+  function buildDiffSelects() {
+    const selA = document.getElementById('diff-ch-a');
+    const selB = document.getElementById('diff-ch-b');
+    selA.innerHTML = '<option value="">Ch A</option>';
+    selB.innerHTML = '<option value="">Ch B</option>';
+    channels.forEach((ch, i) => {
+      selA.innerHTML += `<option value="${i}">${ch.label}</option>`;
+      selB.innerHTML += `<option value="${i}">${ch.label}</option>`;
+    });
+  }
+
+  // ── Channel selection ─────────────────────────────────────────
+  function onChannelToggle(e) {
+    const idx = parseInt(e.target.dataset.idx);
+    if (e.target.checked) {
+      if (!selectedChannels.includes(idx)) selectedChannels.push(idx);
+    } else {
+      selectedChannels = selectedChannels.filter(c => c !== idx);
+    }
+    fetchSelectedData();
+  }
+
+  // ── Differential channels ─────────────────────────────────────
+  document.getElementById('btn-add-diff').addEventListener('click', () => {
+    const aVal = document.getElementById('diff-ch-a').value;
+    const bVal = document.getElementById('diff-ch-b').value;
+    if (aVal === '' || bVal === '') return;
+    const a = parseInt(aVal), b = parseInt(bVal);
+    if (a === b) return;
+    if (diffChannels.some(d => d.a === a && d.b === b)) return;
+    diffChannels.push({ a, b, label: `${channels[a].label} − ${channels[b].label}` });
+    renderDiffList();
+    fetchSelectedData();
+  });
+
+  function renderDiffList() {
+    const container = document.getElementById('diff-list');
+    container.innerHTML = '';
+    diffChannels.forEach((d, i) => {
+      const div = document.createElement('div');
+      div.className = 'diff-list-item';
+      const colorIdx = selectedChannels.length + i;
+      div.innerHTML = `<span style="color:${COLORS[colorIdx % COLORS.length]}">&#9632;</span>
+        <span>${d.label}</span>
+        <span class="remove-diff" data-idx="${i}">&times;</span>`;
+      div.querySelector('.remove-diff').addEventListener('click', (e) => {
+        diffChannels.splice(parseInt(e.target.dataset.idx), 1);
+        renderDiffList();
+        fetchSelectedData();
+      });
+      container.appendChild(div);
+    });
+  }
+
+  // ── Data fetching (one-time, full file) ───────────────────────
+  async function fetchSelectedData() {
+    const needed = new Set(selectedChannels);
+    diffChannels.forEach(d => { needed.add(d.a); needed.add(d.b); });
+
+    const toFetch = [...needed].filter(idx => !signalStore[String(idx)]);
+
+    if (toFetch.length > 0) {
+      document.getElementById('loading').style.display = 'flex';
+      const chStr = toFetch.join(',');
+      const resp = await fetch(`/edfviewer/api/${TRIAL_ID}/allsignals?channels=${chStr}`);
+      const data = await resp.json();
+      for (const [k, v] of Object.entries(data.signals)) {
+        signalStore[k] = v;
+      }
+      document.getElementById('loading').style.display = 'none';
+    }
+
+    drawTraces();
+  }
+
+  // ── Build trace list ──────────────────────────────────────────
+  function buildTraceList() {
+    const traces = [];
+    selectedChannels.forEach(idx => {
+      const sig = signalStore[String(idx)];
+      if (sig) traces.push({ key: `raw:${idx}`, data: sig.data, sampleRate: sig.sampleRate, label: sig.label, type: 'raw', idx });
+    });
+    diffChannels.forEach((d, i) => {
+      const sigA = signalStore[String(d.a)];
+      const sigB = signalStore[String(d.b)];
+      if (sigA && sigB) {
+        const len = Math.min(sigA.data.length, sigB.data.length);
+        const diffData = new Float64Array(len);
+        for (let j = 0; j < len; j++) diffData[j] = sigA.data[j] - sigB.data[j];
+        traces.push({ key: `diff:${i}`, data: diffData, sampleRate: sigA.sampleRate, label: d.label, type: 'diff', diffIdx: i });
+      }
+    });
+    return traces;
+  }
+
+  // ── View helpers ──────────────────────────────────────────────
+  function clampView() {
+    windowLength = Math.max(MIN_WINDOW, Math.min(duration, windowLength));
+    startTime = Math.max(0, Math.min(duration - windowLength, startTime));
+  }
+
+  function setView(newStart, newWindow) {
+    windowLength = newWindow;
+    startTime = newStart;
+    clampView();
+    drawTraces();
+  }
+
+  /** Zoom by a factor, keeping a time anchor at the same screen fraction. */
+  function zoomAround(anchorTime, factor) {
+    const newWindow = windowLength * factor;
+    const anchorFrac = (anchorTime - startTime) / windowLength;
+    const newStart = anchorTime - anchorFrac * newWindow;
+    setView(newStart, newWindow);
+  }
+
+  // ── Drawing ───────────────────────────────────────────────────
+  function resizeCanvas() {
+    const rect = viewerArea.getBoundingClientRect();
+    const w = rect.width;
+    const h = rect.height - 50; // scrollbar(20) + time axis(30)
+    canvas.width = w * devicePixelRatio;
+    canvas.height = h * devicePixelRatio;
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+
+    timeCanvas.width = w * devicePixelRatio;
+    timeCanvas.height = 30 * devicePixelRatio;
+    timeCanvas.style.width = w + 'px';
+    timeCanvas.style.height = '30px';
+    timeCtx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  }
+
+  function drawTraces() {
+    resizeCanvas();
+    const w = canvas.width / devicePixelRatio;
+    const h = canvas.height / devicePixelRatio;
+
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, w, h);
+
+    const traces = buildTraceList();
+    if (traces.length === 0) { drawTimeAxis(w); updateScrollbar(); updateTimeDisplay(); return; }
+
+    const nTraces = traces.length;
+    const rowHeight = h / nTraces;
+    const traceWidth = w - LABEL_WIDTH;
+
+    traces.forEach((trace, i) => {
+      const colorIdx = trace.type === 'diff'
+        ? selectedChannels.length + trace.diffIdx
+        : selectedChannels.indexOf(trace.idx);
+      const color = COLORS[colorIdx % COLORS.length];
+      const userOffset = traceOffsets[trace.key] || 0;
+      const centerY = rowHeight * (i + 0.5) + userOffset;
+
+      // Horizontal separator
+      if (i > 0) {
+        ctx.strokeStyle = '#0f3460';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, rowHeight * i);
+        ctx.lineTo(w, rowHeight * i);
+        ctx.stroke();
+      }
+
+      // Drag handle bar
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 0.4;
+      ctx.lineWidth = 1;
+      for (let line = -3; line <= 3; line += 3) {
+        ctx.beginPath();
+        ctx.moveTo(2, centerY + line);
+        ctx.lineTo(6, centerY + line);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1.0;
+
+      // Channel label
+      ctx.fillStyle = color;
+      ctx.font = '11px monospace';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(trace.label, 10, centerY);
+
+      // Zero line
+      ctx.strokeStyle = '#2a2a4a';
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(LABEL_WIDTH, centerY);
+      ctx.lineTo(w, centerY);
+      ctx.stroke();
+
+      // Extract visible window from full data
+      const fs = trace.sampleRate;
+      const startSample = Math.max(0, Math.floor(startTime * fs));
+      const endSample = Math.min(trace.data.length, Math.ceil((startTime + windowLength) * fs));
+      const numSamples = endSample - startSample;
+      if (numSamples <= 0) return;
+
+      const maxPoints = Math.max(traceWidth * 2, 2000);
+      let step = 1;
+      if (numSamples > maxPoints) step = Math.floor(numSamples / maxPoints);
+
+      const scale = (rowHeight * 0.45) / amplitude;
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      let first = true;
+      for (let j = startSample; j < endSample; j += step) {
+        const x = LABEL_WIDTH + ((j - startSample) / numSamples) * traceWidth;
+        const y = centerY - trace.data[j] * scale;
+        if (first) { ctx.moveTo(x, y); first = false; } else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    });
+
+    drawTimeAxis(w);
+    updateScrollbar();
+    updateTimeDisplay();
+  }
+
+  function drawTimeAxis(w) {
+    const h = 30;
+    timeCtx.fillStyle = '#16213e';
+    timeCtx.fillRect(0, 0, w, h);
+
+    const nTicks = Math.max(2, Math.floor(w / 80));
+    const dt = windowLength / nTicks;
+    const tickInterval = niceInterval(dt);
+
+    timeCtx.strokeStyle = '#0f3460';
+    timeCtx.fillStyle = '#999';
+    timeCtx.font = '11px monospace';
+    timeCtx.textAlign = 'center';
+    timeCtx.textBaseline = 'top';
+
+    const firstTick = Math.ceil(startTime / tickInterval) * tickInterval;
+    for (let t = firstTick; t <= startTime + windowLength + tickInterval * 0.01; t += tickInterval) {
+      const x = ((t - startTime) / windowLength) * w;
+      timeCtx.beginPath();
+      timeCtx.moveTo(x, 0);
+      timeCtx.lineTo(x, 8);
+      timeCtx.stroke();
+
+      // Format label depending on scale
+      let label;
+      if (tickInterval < 1) label = t.toFixed(2) + 's';
+      else if (tickInterval < 10) label = t.toFixed(1) + 's';
+      else label = t.toFixed(0) + 's';
+      timeCtx.fillText(label, x, 10);
+    }
+  }
+
+  function niceInterval(rough) {
+    const niceValues = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 30, 60];
+    for (const v of niceValues) { if (v >= rough * 0.8) return v; }
+    return rough;
+  }
+
+  // ── Navigation ────────────────────────────────────────────────
+  function updateTimeDisplay() {
+    const end = Math.min(startTime + windowLength, duration);
+    document.getElementById('time-display').textContent =
+      `${startTime.toFixed(2)} – ${end.toFixed(2)} s  (${windowLength.toFixed(2)}s window)`;
+  }
+
+  document.getElementById('btn-start').addEventListener('click', () => setView(0, windowLength));
+  document.getElementById('btn-end').addEventListener('click', () => setView(duration - windowLength, windowLength));
+  document.getElementById('btn-prev').addEventListener('click', () => setView(startTime - windowLength, windowLength));
+  document.getElementById('btn-next').addEventListener('click', () => setView(startTime + windowLength, windowLength));
+
+  document.getElementById('amplitude').addEventListener('change', (e) => {
+    amplitude = parseFloat(e.target.value);
+    drawTraces();
+  });
+
+  // ── Premiere-style scrollbar ──────────────────────────────────
+  function updateScrollbar() {
+    if (duration <= 0) return;
+    const container = document.getElementById('scroll-container');
+    const thumb = document.getElementById('scroll-thumb');
+    const containerW = container.offsetWidth;
+    const thumbW = Math.max(20, (windowLength / duration) * containerW);
+    const thumbX = (startTime / duration) * (containerW - thumbW);
+    thumb.style.width = thumbW + 'px';
+    thumb.style.left = thumbX + 'px';
+  }
+
+  (function() {
+    const thumb = document.getElementById('scroll-thumb');
+    const handleL = document.getElementById('scroll-handle-left');
+    const handleR = document.getElementById('scroll-handle-right');
+    const container = document.getElementById('scroll-container');
+
+    let drag = null; // { mode: 'pan'|'left'|'right', startX, origStart, origWindow }
+
+    function onDown(mode, e) {
+      drag = {
+        mode,
+        startX: e.clientX,
+        origStart: startTime,
+        origWindow: windowLength,
+      };
+      e.preventDefault();
+      e.stopPropagation();
+    }
+
+    // Pan the thumb (middle drag)
+    thumb.addEventListener('mousedown', (e) => {
+      // Ignore if click is on a handle
+      if (e.target === handleL || e.target === handleR) return;
+      onDown('pan', e);
+    });
+
+    // Drag left edge to zoom
+    handleL.addEventListener('mousedown', (e) => onDown('left', e));
+
+    // Drag right edge to zoom
+    handleR.addEventListener('mousedown', (e) => onDown('right', e));
+
+    document.addEventListener('mousemove', (e) => {
+      if (!drag) return;
+      const containerW = container.offsetWidth;
+      const dx = e.clientX - drag.startX;
+      const dt = (dx / containerW) * duration;
+
+      if (drag.mode === 'pan') {
+        // Slide the window
+        setView(drag.origStart + dt, drag.origWindow);
+
+      } else if (drag.mode === 'left') {
+        // Move left edge: start changes, right edge stays fixed
+        const rightEdge = drag.origStart + drag.origWindow;
+        let newStart = drag.origStart + dt;
+        let newWindow = rightEdge - newStart;
+        if (newWindow < MIN_WINDOW) { newWindow = MIN_WINDOW; newStart = rightEdge - MIN_WINDOW; }
+        setView(newStart, newWindow);
+
+      } else if (drag.mode === 'right') {
+        // Move right edge: start stays, window length changes
+        let newWindow = drag.origWindow + dt;
+        if (newWindow < MIN_WINDOW) newWindow = MIN_WINDOW;
+        setView(drag.origStart, newWindow);
+      }
+    });
+
+    document.addEventListener('mouseup', () => { drag = null; });
+
+    // Click on track to jump
+    container.addEventListener('mousedown', (e) => {
+      if (e.target !== container) return;
+      const rect = container.getBoundingClientRect();
+      const frac = (e.clientX - rect.left) / rect.width;
+      setView(frac * duration - windowLength / 2, windowLength);
+    });
+  })();
+
+  // ── Mouse wheel: scroll to pan, Ctrl/Cmd+scroll to zoom ──────
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) {
+      // Zoom centered on mouse position
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const frac = Math.max(0, (mx - LABEL_WIDTH) / (rect.width - LABEL_WIDTH));
+      const anchorTime = startTime + frac * windowLength;
+      const factor = e.deltaY > 0 ? 1.3 : 1 / 1.3;
+      zoomAround(anchorTime, factor);
+    } else {
+      // Pan
+      const delta = e.deltaY > 0 ? windowLength * 0.2 : -windowLength * 0.2;
+      setView(startTime + delta, windowLength);
+    }
+  }, { passive: false });
+
+  // Also allow zoom on the scrollbar area
+  document.getElementById('scroll-container').addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const frac = (e.clientX - rect.left) / rect.width;
+    const anchorTime = frac * duration;
+    const factor = e.deltaY > 0 ? 1.3 : 1 / 1.3;
+    zoomAround(anchorTime, factor);
+  }, { passive: false });
+
+  // ── Trace drag (vertical offset) ─────────────────────────────
+  (function() {
+    let dragTrace = null;
+
+    canvas.addEventListener('mousedown', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+
+      if (mx > LABEL_WIDTH) return;
+
+      const traces = buildTraceList();
+      if (traces.length === 0) return;
+      const h = canvas.height / devicePixelRatio;
+      const rowHeight = h / traces.length;
+
+      let bestIdx = -1, bestDist = Infinity;
+      traces.forEach((tr, i) => {
+        const cy = rowHeight * (i + 0.5) + (traceOffsets[tr.key] || 0);
+        const dist = Math.abs(my - cy);
+        if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+      });
+
+      if (bestIdx >= 0 && bestDist < rowHeight * 0.5) {
+        const tr = traces[bestIdx];
+        dragTrace = { key: tr.key, startY: my, startOffset: traceOffsets[tr.key] || 0 };
+        canvas.style.cursor = 'ns-resize';
+        e.preventDefault();
+      }
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!dragTrace) return;
+      const rect = canvas.getBoundingClientRect();
+      const my = e.clientY - rect.top;
+      traceOffsets[dragTrace.key] = dragTrace.startOffset + (my - dragTrace.startY);
+      drawTraces();
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (dragTrace) { dragTrace = null; canvas.style.cursor = ''; }
+    });
+  })();
+
+  document.getElementById('btn-reset-offsets').addEventListener('click', () => {
+    traceOffsets = {};
+    drawTraces();
+  });
+
+  // ── Keyboard shortcuts ────────────────────────────────────────
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight') setView(startTime + windowLength * 0.5, windowLength);
+    if (e.key === 'ArrowLeft') setView(startTime - windowLength * 0.5, windowLength);
+    if (e.key === '+' || e.key === '=') {
+      const sel = document.getElementById('amplitude');
+      if (sel.selectedIndex > 0) { sel.selectedIndex--; amplitude = parseFloat(sel.value); drawTraces(); }
+    }
+    if (e.key === '-') {
+      const sel = document.getElementById('amplitude');
+      if (sel.selectedIndex < sel.options.length - 1) { sel.selectedIndex++; amplitude = parseFloat(sel.value); drawTraces(); }
+    }
+  });
+
+  // ── Resize ────────────────────────────────────────────────────
+  window.addEventListener('resize', () => drawTraces());
+
+  // ── Start ─────────────────────────────────────────────────────
+  init();
+})();
+</script>
+</body>
+</html>

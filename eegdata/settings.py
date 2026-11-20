@@ -42,6 +42,9 @@ INSTALLED_APPS = [
   'dataEndpoint',
   'Trial',
   'Dataset',
+  'Analysis',
+  'EDFViewer',
+  'rest_framework',
 ]
 
 MIDDLEWARE = [
@@ -59,7 +62,7 @@ ROOT_URLCONF = 'eegdata.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -76,18 +79,18 @@ WSGI_APPLICATION = 'eegdata.wsgi.application'
 
 
 # Database
-# https://docs.djangoproject.com/en/4.1/ref/settings/#databases
+# https://docs.djangoproject.com/en/4.1/ref/settings/#database
 
 DATABASES = {
-    'default': {
-      'ENGINE': 'django.contrib.gis.db.backends.mysql', # Add 'postgresql_psycopg2', 'mysql', 'sqlite3' or 'oracle'.
-      'NAME': config('DB_NAME'),                      # Or path to database file if using sqlite3.
-      # The following settings are not used with sqlite3:
+  'default': {
+    'ENGINE': 'django.contrib.gis.db.backends.mysql', # Add 'postgresql_psycopg2', 'mysql', 'sqlite3' or 'oracle'.
+    'NAME': config('DB_NAME'),                      # Or path to database file if using sqlite3.
+    # The following settings are not used with sqlite3:
  'USER': config('DB_USER'),
-      'PASSWORD': config('DB_PASSWORD'),
-      'HOST': '',                      # Empty for localhost through domain sockets or '127.0.0.1' for localhost through TCP.
-      'PORT': '',                      # Set to empty string for default.
-    }
+    'PASSWORD': config('DB_PASSWORD'),
+    'HOST': '',                      # Empty for localhost through domain sockets or '127.0.0.1' for localhost through TCP.
+    'PORT': '',                      # Set to empty string for default.
+  }
 }
 
 
@@ -164,7 +167,8 @@ STATIC_URL = 'static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'static/')
 
 MEDIA_URL = '/media/'
-MEDIA_ROOT = os.path.join(BASE_DIR, 'media/')
+MEDIA_RELATIVE='media/'
+MEDIA_ROOT = os.path.join(BASE_DIR, MEDIA_RELATIVE)
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.1/ref/settings/#default-auto-field

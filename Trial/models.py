@@ -33,8 +33,10 @@ class Trial(models.Model):
   layFile=models.FileField(upload_to="trialData", blank=True)
   statFile=models.FileField(upload_to="trialData", blank=True)
   EDFStartTime=models.TextField(default="00:00:00.0")
+  calibrationTimestamps=models.TextField(blank=True)
   calibrationFlashes=models.FloatField(default=5)
   calibrationPeriod=models.IntegerField(default=60)
+  trialStartMillis=models.FloatField(default=0)
   analysisStarted=models.BooleanField(default=False)
   analysisError=models.BooleanField(default=False)
   periStimulusAverage=models.FileField(upload_to="analysis", blank=True)
@@ -42,6 +44,7 @@ class Trial(models.Model):
   filteredPeriPromptStimulusAverage=models.FileField(upload_to="analysis", blank=True)
   periNonStimulusAverage=models.FileField(upload_to="analysis", blank=True)
   analysisData=models.FileField(upload_to="analysis", blank=True)
+  analysisReport=models.FileField(upload_to="analysis/reports", blank=True)
   analysisOutput=models.TextField(blank=True)
   def __str__(self):
     if self.edfFile:

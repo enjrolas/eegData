@@ -1,86 +1,289 @@
-{% load static %}
-<html>
-  <head>
-    <script type="text/javascript" src="{% static 'js/jquery-3.7.1.min.js' %}"></script>
-    <!-- jQuery Modal -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery-modal/0.9.1/jquery.modal.min.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/jquery-modal/0.9.1/jquery.modal.min.css" />
-    <script type="text/javascript">
-      $(function(){
-	  $('.modal#newSubject').hide();
-	  $("form#newSubject").on("submit", function(event){
-	      event.preventDefault();
-	      $.post($("form#newSubject").attr("action"),          
-                     {     
-                         "subjectId": $("input#subjectId").val(),    
-                         "notes": $("input#notes").val(),      
-		     },	  
-		     function(data){
-                         $.modal.close();
-			 $("select#subject").append($('<option>',{
-			     value: data['subjectId'],
-			     text: data['subjectId'],
-			 }).attr('selected','selected'));
-		     });
-	  });
-      });
-      function selectChanged(){
-	  if($('#subject').val()=="new")
-	      $("#newSubject").modal();
+{% load static %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>New trial · EEG Data</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+  <script src="{% static 'js/jquery-3.7.1.min.js' %}"></script>
+  <style>
+    :root {
+      --paper: #EEF2F4;      /* chart paper */
+      --grid: #C9D5DC;       /* chart grid */
+      --sheet: #FFFFFF;
+      --ink: #1D2A33;        /* slate ink */
+      --muted: #5C6B75;
+      --trace: #2F5BEA;      /* pen trace: actions */
+      --marker: #C2185B;     /* event marker: focus, errors */
+      --line: #D5DEE3;
+      --radius-field: 6px;
+      --radius-sheet: 14px;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --paper: #121A20; --grid: #1E2A33; --sheet: #18232B; --ink: #E3EAEE;
+        --muted: #93A3AD; --trace: #7B9BFF; --marker: #F06292; --line: #2A3944;
       }
-      
-      </script>
-  </head>
-  <body>
-    <form id="trialSetup" action="{% url 'jigsaw' %}" method="get">
-      <div>Subject ID</div>
-      <select name="subjectId" id="subject" onchange="selectChanged();">
-	<option value="0">---</option>
-	<option value="new">New</option>
-	{% for subject in subjects %}
-	<option value="{{ subject.subjectId }}">{{ subject }}</option>
-	{% endfor %}
-	
-      </select>
-      <div>Dataset</div>
-      {% for dataset in datasets %}
-      <input type="radio" name="dataset" id="{{ dataset.name }}" value="{{ dataset.name }}" {% if dataset.default %}checked{% endif %}>
-      <label for="{{ dataset.name }}">{{ dataset.name }}</label>
-      {% endfor %}
-      <div>Trial Style</div>
-      {% for choice in trial.STYLE_CHOICES %}
-      <input type="radio" name="trialStyle" id="{{ choice.0 }}" value="{{ choice.0 }}"{% if choice.0 == trial.KEY %}checked{% endif %}>
-      <label for="{{ choice.0 }}">{{ choice.1 }}</label>
-      {% endfor %}
-      
-      <div>Delay between images(ms)</div>
-      <input type="text" name="delay" value="300">
-      <div>Scrambled Pieces</div>
-      <input type="text" name="pieces" value="500">
-      <div>Ratio of objects to non-objects</div>
-      <input type="text" name="ratio" value="0.14">
-      <div>Number of total images to show</div>      
-      <input type="text" name="totalImages" value="500">
-      <div>Number of calibration flash cycles</div>      
-      <input type="text" name="calibrationFlashes" value="5">
-      <div>period (in ms) of calibration flashes)</div>      
-      <input type="text" name="calibrationPeriod" value="1000">
-      <div>
-	<input type="submit" value="Start Trial">
+    }
+    * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0; min-height: 100vh; color: var(--ink);
+      font: 17px/1.5 "Atkinson Hyperlegible", system-ui, sans-serif;
+      background-color: var(--paper);
+      /* EEG chart paper: 5 mm minor / 25 mm major grid */
+      background-image:
+        linear-gradient(var(--grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px),
+        linear-gradient(color-mix(in srgb, var(--grid) 45%, transparent) 1px, transparent 1px),
+        linear-gradient(90deg, color-mix(in srgb, var(--grid) 45%, transparent) 1px, transparent 1px);
+      background-size: 100px 100px, 100px 100px, 20px 20px, 20px 20px;
+    }
+    main { max-width: 760px; margin: 0 auto; padding: 40px 16px 64px; }
+
+    header { margin-bottom: 20px; }
+    header h1 { font-size: 2.35rem; line-height: 1.1; margin: 0 0 6px; letter-spacing: -0.01em; }
+    header p { margin: 0; color: var(--muted); max-width: 60ch; }
+    .trace { display: block; width: 100%; height: 56px; margin: 14px 0 0; overflow: visible; }
+    .trace path { fill: none; stroke: var(--trace); stroke-width: 2; stroke-linejoin: round;
+                  stroke-dasharray: 1; stroke-dashoffset: 1; vector-effect: non-scaling-stroke; animation: draw 1.8s ease-out .15s forwards; }
+    .trace line { stroke: var(--marker); stroke-width: 1.5; stroke-dasharray: 3 3; }
+    @keyframes draw { to { stroke-dashoffset: 0; } }
+    @media (prefers-reduced-motion: reduce) { .trace path { animation: none; stroke-dashoffset: 0; } }
+
+    form.sheet { background: var(--sheet); border: 1px solid var(--line); border-radius: var(--radius-sheet);
+                 padding: 8px 28px 28px; box-shadow: 0 1px 0 var(--line), 0 18px 40px -28px rgba(29,42,51,.35); }
+    fieldset { border: 0; padding: 22px 0 6px; margin: 0; border-top: 1px solid var(--line); }
+    fieldset:first-of-type { border-top: 0; }
+    legend { font-weight: 700; font-size: 1.15rem; padding: 0; margin-bottom: 4px; float: left; width: 100%; }
+    legend + * { clear: both; }
+    .hint { color: var(--muted); font-size: .9rem; margin: 0 0 14px; }
+
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 20px; }
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    .field.wide { grid-column: 1 / -1; }
+    .name { font-weight: 700; font-size: .95rem; }
+    .unit { color: var(--muted); font-weight: 400; }
+
+    input[type=number], select, dialog input[type=text] {
+      font: inherit; color: var(--ink); background: var(--sheet); width: 100%;
+      border: 1.5px solid var(--line); border-radius: var(--radius-field); padding: 10px 12px; min-height: 46px;
+    }
+    select { appearance: none; padding-right: 40px; cursor: pointer;
+      background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+      background-position: calc(100% - 20px) 50%, calc(100% - 14px) 50%; background-size: 6px 6px; background-repeat: no-repeat; }
+    input:hover, select:hover { border-color: var(--muted); }
+    :focus-visible { outline: 3px solid var(--marker); outline-offset: 2px; }
+    input:focus, select:focus { border-color: var(--marker); }
+    .invalid select { border-color: var(--marker); }
+    .error-text { color: var(--marker); font-size: .9rem; display: none; }
+    .invalid .error-text { display: block; }
+
+    /* segmented choices for dataset / trial style */
+    .choices { display: flex; flex-wrap: wrap; gap: 8px; }
+    .choices input { position: absolute; opacity: 0; pointer-events: none; }
+    .choices label { border: 1.5px solid var(--line); border-radius: 999px; padding: 8px 16px; cursor: pointer;
+                     min-height: 44px; display: inline-flex; align-items: center; }
+    .choices input:checked + label { border-color: var(--trace); background: color-mix(in srgb, var(--trace) 10%, transparent);
+                                     color: var(--trace); font-weight: 700; }
+    .choices input:focus-visible + label { outline: 3px solid var(--marker); outline-offset: 2px; }
+
+    .check { display: flex; gap: 12px; align-items: flex-start; cursor: pointer; }
+    .check input { width: 22px; height: 22px; margin: 2px 0 0; accent-color: var(--trace); flex: none; }
+
+    .actions { margin-top: 26px; }
+    button, .btn { font: inherit; font-weight: 700; border-radius: var(--radius-field); cursor: pointer; min-height: 48px; padding: 0 22px; }
+    button.primary { width: 100%; font-size: 1.1rem; color: #fff; background: var(--trace); border: 0; }
+    button.primary:hover { filter: brightness(1.08); }
+    button.quiet { background: transparent; color: var(--ink); border: 1.5px solid var(--line); }
+
+    dialog { border: 1px solid var(--line); border-radius: var(--radius-sheet); padding: 24px; width: min(440px, calc(100vw - 32px));
+             background: var(--sheet); color: var(--ink); }
+    dialog::backdrop { background: rgba(18,26,32,.45); }
+    dialog h2 { margin: 0 0 14px; font-size: 1.3rem; }
+    dialog .field { margin-bottom: 14px; }
+    dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 8px; }
+    dialog .row button.primary { width: auto; }
+    .dialog-error { color: var(--marker); min-height: 1.5em; margin: 0; font-size: .9rem; }
+
+    footer { margin-top: 18px; color: var(--muted); font-size: .9rem; text-align: center; }
+    footer a { color: inherit; }
+
+    @media (max-width: 560px) {
+      main { padding-top: 24px; }
+      header h1 { font-size: 1.9rem; }
+      form.sheet { padding: 4px 18px 22px; }
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Set up a trial</h1>
+    <p>Choose who is being recorded and how the images are shown, then start the trial on this screen.</p>
+    <svg class="trace" viewBox="0 0 760 56" preserveAspectRatio="none" aria-hidden="true">
+      <line x1="300" y1="0" x2="300" y2="56"/>
+      <path pathLength="1" d="M0 30 L40 28 L60 33 L80 26 L100 31 L130 29 L150 34 L170 27 L200 30 L230 28 L250 32 L270 29 L290 31 L300 30 L310 36 L322 22 L334 40 L350 8 L372 44 L392 24 L410 31 L440 28 L470 32 L500 27 L530 31 L560 29 L590 33 L620 27 L650 30 L680 29 L710 32 L740 28 L760 30"/>
+    </svg>
+  </header>
+
+  <form id="trialSetup" class="sheet" action="{% url 'jigsaw' %}" method="get" novalidate>
+    <fieldset>
+      <legend>Subject and stimuli</legend>
+      <div class="grid">
+        <div class="field wide" id="subjectField">
+          <label class="name" for="subject">Subject</label>
+          <select name="subjectId" id="subject" required>
+            <option value="" selected disabled>Choose a subject</option>
+            <option value="new">Add a new subject…</option>
+            {% for subject in subjects %}
+            <option value="{{ subject.subjectId }}">{{ subject }}</option>
+            {% endfor %}
+          </select>
+          <span class="error-text">Choose a subject before starting the trial.</span>
+        </div>
+
+        <div class="field wide" role="radiogroup" aria-labelledby="datasetLabel">
+          <span class="name" id="datasetLabel">Image set</span>
+          <div class="choices">
+            {% for dataset in datasets %}
+            <input type="radio" name="dataset" id="ds-{{ forloop.counter }}" value="{{ dataset.name }}" {% if dataset.default %}checked{% endif %}>
+            <label for="ds-{{ forloop.counter }}">{{ dataset.name }}</label>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="field wide" role="radiogroup" aria-labelledby="styleLabel">
+          <span class="name" id="styleLabel">How the subject responds</span>
+          <div class="choices">
+            {% for choice in trial.STYLE_CHOICES %}
+            <input type="radio" name="trialStyle" id="style-{{ choice.0 }}" value="{{ choice.0 }}" {% if choice.0 == trial.KEY %}checked{% endif %}>
+            <label for="style-{{ choice.0 }}">{{ choice.1 }}</label>
+            {% endfor %}
+          </div>
+        </div>
       </div>
-    </form>
-    <!-- Modal HTML embedded directly into document -->
-    <div id="newSubject" class="modal">
-      <form id="newSubject" action="{% url 'newSubject' %}" method="post">
-	<div>Subject Id</div>
-	<input type="text" name="newSubjectName" id="subjectId">
-	<div>Notes</div>      
-        <input type="text" name="notes" id="notes">
-        <div>
-	  <input type="submit" value="submit">
-      </form>
-      <a href="#" rel="modal:close">Close</a>
+    </fieldset>
+
+    <fieldset>
+      <legend>Timing</legend>
+      <p class="hint">Defaults give about 15% recognisable images, one every 300 ms.</p>
+      <div class="grid">
+        <div class="field">
+          <label class="name" for="delay">Delay between images <span class="unit">ms</span></label>
+          <input type="number" id="delay" name="delay" value="300" min="1" step="1" inputmode="numeric">
+        </div>
+        <div class="field">
+          <label class="name" for="totalImages">Images to show</label>
+          <input type="number" id="totalImages" name="totalImages" value="500" min="1" step="1" inputmode="numeric">
+        </div>
+        <div class="field">
+          <label class="name" for="ratio">Share of clear images <span class="unit">0–1</span></label>
+          <input type="number" id="ratio" name="ratio" value="0.14" min="0" max="1" step="0.01" inputmode="decimal">
+        </div>
+        <div class="field">
+          <label class="name" for="pieces">Scrambled pieces</label>
+          <input type="number" id="pieces" name="pieces" value="500" min="1" step="1" inputmode="numeric">
+        </div>
       </div>
-      
-  </body>
+    </fieldset>
+
+    <fieldset>
+      <legend>Calibration</legend>
+      <p class="hint">Flashes at the start let the analysis line up the EEG with the images.</p>
+      <div class="grid">
+        <div class="field">
+          <label class="name" for="calibrationFlashes">Flash cycles</label>
+          <input type="number" id="calibrationFlashes" name="calibrationFlashes" value="5" min="0" step="1" inputmode="numeric">
+        </div>
+        <div class="field">
+          <label class="name" for="calibrationPeriod">Flash period <span class="unit">ms</span></label>
+          <input type="number" id="calibrationPeriod" name="calibrationPeriod" value="1000" min="1" step="1" inputmode="numeric">
+        </div>
+        <div class="field wide">
+          <label class="check">
+            <input type="checkbox" name="doubleSync" value="doubleSync" checked>
+            <span><b>Use the double-sync patch</b><br><span class="unit">Shows the photodiode patch with every image. Leave on unless you are using the old setup.</span></span>
+          </label>
+        </div>
+      </div>
+    </fieldset>
+
+    <div class="actions">
+      <button type="submit" class="primary">Start trial</button>
+    </div>
+  </form>
+
+  <footer><a href="{% url 'analyses' %}">View analysed trials</a></footer>
+</main>
+
+<dialog id="newSubjectDialog" aria-labelledby="newSubjectTitle">
+  <form id="newSubject" action="{% url 'newSubject' %}" method="post">
+    <h2 id="newSubjectTitle">Add a subject</h2>
+    <div class="field">
+      <label class="name" for="subjectIdInput">Subject ID</label>
+      <input type="text" name="newSubjectName" id="subjectIdInput" required autocomplete="off" placeholder="e.g. AF2">
+    </div>
+    <div class="field">
+      <label class="name" for="notes">Notes <span class="unit">optional</span></label>
+      <input type="text" name="notes" id="notes" autocomplete="off">
+    </div>
+    <p class="dialog-error" id="dialogError" role="alert"></p>
+    <div class="row">
+      <button type="button" class="quiet" id="cancelNewSubject">Cancel</button>
+      <button type="submit" class="primary">Add subject</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+  $(function () {
+    var dialog = document.getElementById('newSubjectDialog');
+    var $subject = $('#subject');
+    var previous = '';
+
+    $subject.on('focus', function () { previous = $subject.val() || ''; });
+    $subject.on('change', function () {
+      $('#subjectField').removeClass('invalid');
+      if ($subject.val() === 'new') {
+        $('#dialogError').text('');
+        dialog.showModal();
+        $('#subjectIdInput').val('').trigger('focus');
+      }
+    });
+
+    function closeDialog() {
+      dialog.close();
+      if ($subject.val() === 'new') { $subject.val(previous); }
+    }
+    $('#cancelNewSubject').on('click', closeDialog);
+    dialog.addEventListener('cancel', function (e) { e.preventDefault(); closeDialog(); });
+
+    $('form#newSubject').on('submit', function (event) {
+      event.preventDefault();
+      var id = $.trim($('#subjectIdInput').val());
+      if (!id) { $('#dialogError').text('Enter a subject ID.'); return; }
+      $.post($(this).attr('action'), { subjectId: id, notes: $('#notes').val() })
+        .done(function (data) {
+          var opt = $('<option>', { value: data.subjectId, text: data.subjectId });
+          $subject.append(opt).val(data.subjectId);
+          dialog.close();
+        })
+        .fail(function () { $('#dialogError').text('The subject could not be added. Check the ID and try again.'); });
+    });
+
+    $('form#trialSetup').on('submit', function (event) {
+      var v = $subject.val();
+      if (!v || v === 'new') {
+        event.preventDefault();
+        $('#subjectField').addClass('invalid');
+        $subject.trigger('focus');
+      }
+    });
+  });
+</script>
+</body>
 </html>

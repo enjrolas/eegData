@@ -18,6 +18,8 @@ from django.urls import path, include
 
 urlpatterns = [
   path('admin/', admin.site.urls),
+  path('edfviewer/', include('EDFViewer.urls')),
   path('dataEndpoint/', include('dataEndpoint.urls')),
-  path('', include('Trial.urls'))
+  path('', include('Trial.urls')),
+#  path("api-auth/", include("rest_framework.urls")),
 ]

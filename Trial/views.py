@@ -49,8 +49,10 @@ def jsonRecorder(request):
   recognitionPresses=request.POST.get("recognitionPresses")
   trialStyle=request.POST.get("trialStyle")
   calibrationFlashes=request.POST.get("calibrationFlashes")
+  calibrationTimestamps=request.POST.get("calibrationTimestamps")
   calibrationPeriod=request.POST.get("calibrationPeriod")
   javascriptVersion=request.POST.get("javascriptVersion")
+  trialStartMillis=request.POST.get("trialStartMillis")
   trial=Trial()
   subject=Subject.objects.get(subjectId=subjectId)
   trial.subject=subject
@@ -66,6 +68,8 @@ def jsonRecorder(request):
   trial.trialStyle=trialStyle
   trial.calibrationFlashes=calibrationFlashes
   trial.calibrationPeriod=calibrationPeriod
+  trial.calibrationTimestamps=calibrationTimestamps
+  trial.trialStartMillis=trialStartMillis
   #trial.javascriptVersion=javascriptVersion
   trial.save()
   change_url = reverse("admin:Trial_trial_change", args=(trial.id,))
@@ -94,9 +98,27 @@ def trialData(request, id):
   return JsonResponse(jsonData[0], safe=False)
 
 def analyses(request):
-  trials=Trial.objects.all().order_by('-timestamp')
+  from Analysis.summary import load_summary, status_of
+  from Analysis.labels import WINDOW_TEXT
+  rows=[]
+  for trial in Trial.objects.select_related('subject').order_by('-timestamp'):
+    summary=load_summary(trial) if trial.edfFile else None
+    cls, label=status_of(trial, summary)
+    best=None
+    if summary and summary.get("best_channel"):
+      best={"channel": summary["best_channel"], "uv": "%+.1f" % summary["best_mean_uv"],
+            "p": "%.3f" % summary["best_p"], "sig": summary["best_p"] < 0.05,
+            "peak": "%.0f" % summary["best_peak_ms"] if summary.get("best_peak_ms") is not None else None}
+    rows.append({"trial": trial, "cls": cls, "label": label, "best": best,
+                 "channels": ", ".join(summary.get("channels", [])) if summary else ""})
+  with_data=[r for r in rows if r["trial"].edfFile]
   context={
-    "trials": trials,
+    "rows": rows,
+    "window": WINDOW_TEXT,
+    "n_total": len(rows),
+    "n_data": len(with_data),
+    "n_ok": sum(1 for r in with_data if r["label"]=="ok"),
+    "n_sig": sum(1 for r in with_data if r["best"] and r["best"]["sig"]),
     }
   return render(request, "Trial/analyses.html", context)
 

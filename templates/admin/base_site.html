@@ -1,0 +1,125 @@
+{% extends "admin/base.html" %}
+{% comment %}
+  EEG Data admin theme — chart-paper palette shared with the setup form.
+  Overrides Django's admin CSS variables, styles messages as a banner, and
+  styles the analysis results panel rendered by Trial/admin.py.
+{% endcomment %}
+
+{% block title %}{% if subtitle %}{{ subtitle }} | {% endif %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block extrastyle %}{{ block.super }}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root, html[data-theme="light"] {
+    --eeg-paper: #EEF2F4; --eeg-grid: #C9D5DC; --eeg-ink: #1D2A33; --eeg-muted: #5C6B75;
+    --eeg-trace: #2F5BEA; --eeg-marker: #C2185B; --eeg-line: #D5DEE3; --eeg-sheet: #FFFFFF;
+    --eeg-good: #2E7D32; --eeg-warn: #B9770E; --eeg-bad: #C0392B;
+
+    --primary: #2F5BEA; --secondary: #1D2A33; --accent: #9DB4FF; --primary-fg: #fff;
+    --body-fg: #1D2A33; --body-bg: #FFFFFF; --body-quiet-color: #5C6B75; --body-loud-color: #0E171D;
+    --header-color: #C9D5DC; --header-branding-color: #FFFFFF; --header-bg: #1D2A33; --header-link-color: #FFFFFF;
+    --breadcrumbs-fg: #C9D5DC; --breadcrumbs-link-fg: #FFFFFF; --breadcrumbs-bg: #2C3D49;
+    --link-fg: #2F5BEA; --link-hover-color: #1A3BB5; --link-selected-fg: #1A3BB5;
+    --hairline-color: #D5DEE3; --border-color: #C9D5DC;
+    --darkened-bg: #EEF2F4; --selected-bg: #E3EAFF; --selected-row: #F1F5FF;
+    --button-fg: #fff; --button-bg: #2F5BEA; --button-hover-bg: #1A3BB5;
+    --default-button-bg: #1D2A33; --default-button-hover-bg: #2C3D49;
+    --close-button-bg: #5C6B75; --close-button-hover-bg: #1D2A33;
+    --delete-button-bg: #C0392B; --delete-button-hover-bg: #962D22;
+    --message-success-bg: #E6F4E7; --message-warning-bg: #FDF2DC; --message-error-bg: #FBE4EA;
+    --font-family-primary: "Atkinson Hyperlegible", system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --eeg-paper: #121A20; --eeg-ink: #E3EAEE; --eeg-muted: #93A3AD; --eeg-line: #2A3944; --eeg-sheet: #18232B;
+      --eeg-trace: #7B9BFF; --eeg-marker: #F06292;
+      --primary: #7B9BFF; --link-fg: #9DB4FF; --link-hover-color: #C3D1FF; --button-bg: #3D63E0;
+      --header-bg: #0D1418; --breadcrumbs-bg: #18232B; --body-bg: #121A20; --darkened-bg: #18232B;
+      --message-success-bg: #1B3320; --message-warning-bg: #3A2E12; --message-error-bg: #3D1A24;
+    }
+  }
+  html[data-theme="dark"] {
+    --eeg-paper: #121A20; --eeg-ink: #E3EAEE; --eeg-muted: #93A3AD; --eeg-line: #2A3944; --eeg-sheet: #18232B;
+    --eeg-trace: #7B9BFF; --eeg-marker: #F06292;
+    --primary: #7B9BFF; --link-fg: #9DB4FF; --link-hover-color: #C3D1FF; --button-bg: #3D63E0;
+    --header-bg: #0D1418; --breadcrumbs-bg: #18232B; --body-bg: #121A20; --darkened-bg: #18232B;
+    --message-success-bg: #1B3320; --message-warning-bg: #3A2E12; --message-error-bg: #3D1A24;
+  }
+
+  body { font-size: 15px; }
+  #header { border-bottom: 3px solid var(--eeg-trace); }
+  #branding h1 a { display: inline-flex; align-items: center; gap: 10px; font-weight: 700; }
+  #branding svg { width: 64px; height: 20px; }
+  #branding svg path { fill: none; stroke: #9DB4FF; stroke-width: 2; stroke-linejoin: round; }
+  .module, fieldset.module, .inline-group { border-radius: 10px; }
+  .module h2, .module caption, .inline-group h2 { border-radius: 8px 8px 0 0; background: var(--secondary); }
+  input[type=text], input[type=number], input[type=password], input[type=email], input[type=url],
+  textarea, select, .vTextField {
+    border-radius: 6px; border: 1.5px solid var(--border-color); padding: 7px 9px; font-family: inherit;
+  }
+  input:focus, textarea:focus, select:focus { border-color: var(--eeg-marker); outline: 2px solid var(--eeg-marker); outline-offset: 1px; }
+  .button, input[type=submit], input[type=button], .submit-row input, a.button { border-radius: 6px; font-weight: 700; }
+  fieldset .description { color: var(--body-quiet-color); }
+
+  /* messages as a banner pinned under the header */
+  ul.messagelist { position: sticky; top: 0; z-index: 50; margin: 0; }
+  ul.messagelist li { font-size: 15px; padding: 14px 52px 14px 72px; background-position: 40px 15px; border-left: 6px solid; position: relative;
+                      box-shadow: 0 6px 18px -12px rgba(0,0,0,.45); animation: eeg-drop .35s ease-out; }
+  ul.messagelist li.success { border-color: var(--eeg-good); }
+  ul.messagelist li.warning { border-color: var(--eeg-warn); }
+  ul.messagelist li.error { border-color: var(--eeg-bad); }
+  ul.messagelist li .eeg-close { position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+                                 background: none; border: 0; font-size: 22px; line-height: 1; cursor: pointer;
+                                 color: inherit; padding: 4px 8px; }
+  @keyframes eeg-drop { from { transform: translateY(-12px); opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { ul.messagelist li { animation: none; } }
+
+  /* status badges + results panel (Trial admin) */
+  .eeg-badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-weight: 700; font-size: 12px; color: #fff; white-space: nowrap; }
+  .eeg-good { background: var(--eeg-good); } .eeg-warn { background: var(--eeg-warn); }
+  .eeg-bad { background: var(--eeg-bad); } .eeg-muted { background: var(--eeg-muted); }
+  a.eeg-pdf { font-weight: 700; }
+  .eeg-results { max-width: 1200px; }
+  .eeg-head { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .eeg-head .eeg-badge { font-size: 14px; padding: 5px 14px; }
+  .eeg-meta { color: var(--body-quiet-color); margin: 6px 0; }
+  .eeg-warning { background: var(--message-warning-bg); border-left: 4px solid var(--eeg-warn); padding: 8px 12px; margin: 8px 0; }
+  table.eeg-table { margin: 12px 0; border-collapse: collapse; }
+  table.eeg-table th, table.eeg-table td { padding: 6px 14px; text-align: right; border-bottom: 1px solid var(--hairline-color); }
+  table.eeg-table th:first-child, table.eeg-table td:first-child { text-align: left; }
+  table.eeg-table tr.eeg-sig td { font-weight: 700; }
+  .eeg-figs figure { margin: 18px 0 0; }
+  .eeg-figs figcaption { margin-bottom: 6px; }
+  .eeg-figs figcaption span { color: var(--body-quiet-color); display: block; font-size: 13px; }
+  .eeg-figs img { max-width: 100%; height: auto; border: 1px solid var(--hairline-color); border-radius: 6px; background: #fff; }
+  pre.eeg-log { white-space: pre-wrap; background: var(--darkened-bg); padding: 10px 12px; border-radius: 6px; font-size: 12px; max-height: 420px; overflow: auto; }
+  pre.eeg-log-error { border-left: 4px solid var(--eeg-bad); }
+  .form-row.field-analysis_results label { display: none; }
+  .form-row.field-analysis_results .readonly { margin-left: 0 !important; padding-left: 0; width: 100%; }
+  .form-row.field-analysis_results .flex-container { display: block; }
+</style>
+{% endblock %}
+
+{% block branding %}
+<h1 id="site-name"><a href="{% url 'admin:index' %}">
+  <svg viewBox="0 0 64 20" aria-hidden="true"><path d="M0 11 L12 10 L18 12 L22 9 L26 13 L29 2 L33 18 L37 7 L41 11 L52 10 L64 11"/></svg>
+  {{ site_header|default:_('Django administration') }}
+</a></h1>
+{% if user.is_anonymous %}{% include "admin/color_theme_toggle.html" %}{% endif %}
+{% endblock %}
+
+{% block nav-global %}{% endblock %}
+
+{% block footer %}{{ block.super }}
+<script>
+  // dismissible message banners
+  document.querySelectorAll('ul.messagelist li').forEach(function (li) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'eeg-close'; b.setAttribute('aria-label', 'Dismiss'); b.textContent = '×';
+    b.addEventListener('click', function () { li.remove(); });
+    li.appendChild(b);
+  });
+</script>
+{% endblock %}

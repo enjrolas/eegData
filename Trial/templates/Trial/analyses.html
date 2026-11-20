@@ -1,19 +1,134 @@
-<html>
-  <head>
-    <style>
-      span.error{
-	  color: red;
-      }
-      span.success { 
-	  color: blue;
-      }      
-    </style>
-  </head>  
-  <body>
-    <ul>
-    {% for trial in trials %}
-    <li><span class="{% if trial.analysisError %}error{% else %}success{% endif %}"> Analysis Complete  </span><a href="{% url 'analysis' trial.pk %}">{{ trial }}</li></a>
-    {% endfor %}
-    </ul>
-  </body>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Analysed trials · EEG Data</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --paper: #EEF2F4; --grid: #C9D5DC; --sheet: #FFFFFF; --ink: #1D2A33; --muted: #5C6B75;
+      --trace: #2F5BEA; --marker: #C2185B; --line: #D5DEE3;
+      --good: #2E7D32; --warn: #B9770E; --bad: #C0392B; --none: #8796A0;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --paper: #121A20; --grid: #1E2A33; --sheet: #18232B; --ink: #E3EAEE; --muted: #93A3AD;
+              --trace: #7B9BFF; --marker: #F06292; --line: #2A3944; --none: #5C6B75; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); font: 16px/1.5 "Atkinson Hyperlegible", system-ui, sans-serif;
+           background-color: var(--paper);
+           background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+           background-size: 100px 100px; }
+    main { max-width: 1100px; margin: 0 auto; padding: 36px 16px 64px; }
+    header { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 24px; margin-bottom: 18px; }
+    h1 { margin: 0; font-size: 2.2rem; line-height: 1.1; }
+    header p { margin: 6px 0 0; color: var(--muted); max-width: 62ch; }
+    a { color: var(--trace); }
+    .new { font-weight: 700; text-decoration: none; border: 1.5px solid var(--trace); border-radius: 6px; padding: 9px 16px; white-space: nowrap; }
+    .new:hover { background: color-mix(in srgb, var(--trace) 10%, transparent); }
+    :focus-visible { outline: 3px solid var(--marker); outline-offset: 2px; }
+
+    .counts { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 0 0 16px; padding: 0; list-style: none; color: var(--muted); }
+    .counts b { color: var(--ink); font-size: 1.25rem; margin-right: 4px; }
+
+    .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    .filters button { font: inherit; font-size: .95rem; cursor: pointer; border: 1.5px solid var(--line); background: var(--sheet);
+                      color: var(--ink); border-radius: 999px; padding: 6px 14px; min-height: 40px; }
+    .filters button[aria-pressed="true"] { border-color: var(--trace); color: var(--trace); font-weight: 700;
+                                           background: color-mix(in srgb, var(--trace) 10%, var(--sheet)); }
+
+    .sheet { background: var(--sheet); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+    th { font-size: .85rem; color: var(--muted); font-weight: 700; background: color-mix(in srgb, var(--paper) 60%, var(--sheet)); }
+    tr:last-child td { border-bottom: 0; }
+    tr.nodata td { color: var(--muted); }
+    tr[hidden] { display: none !important; }
+    th.bestcol { min-width: 190px; }
+    td.id a { font-weight: 700; text-decoration: none; }
+    .when { white-space: nowrap; }
+    .badge { display: inline-block; border-radius: 999px; padding: 2px 10px; font-size: .85rem; font-weight: 700; color: #fff; white-space: nowrap; }
+    .badge.good { background: var(--good); } .badge.warn { background: var(--warn); }
+    .badge.bad { background: var(--bad); } .badge.muted { background: var(--none); }
+    .best.sig { font-weight: 700; }
+    .best small { color: var(--muted); display: block; font-weight: 400; }
+    .links a { margin-right: 12px; white-space: nowrap; }
+    .note { color: var(--muted); font-size: .9rem; margin-top: 12px; }
+
+    @media (max-width: 720px) {
+      h1 { font-size: 1.8rem; }
+      thead { display: none; }
+      table, tbody, tr, td { display: block; width: 100%; }
+      tr { padding: 12px 16px; border-bottom: 1px solid var(--line); }
+      td { border: 0; padding: 2px 0; }
+      td.id { font-size: 1.1rem; }
+      td[data-label]::before { content: attr(data-label) ": "; color: var(--muted); }
+      td.status { margin: 4px 0; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Analysed trials</h1>
+      <p>Each recording is tested for a recognition potential: the difference between clear and scrambled images {{ window }} after onset, on every connected electrode.</p>
+    </div>
+    <a class="new" href="{% url 'home' %}">Set up a new trial</a>
+  </header>
+
+  <ul class="counts">
+    <li><b>{{ n_data }}</b>trials with EEG data</li>
+    <li><b>{{ n_ok }}</b>analysed without warnings</li>
+    <li><b>{{ n_sig }}</b>with a channel at p &lt; 0.05</li>
+  </ul>
+
+  <div class="filters" role="group" aria-label="Show trials">
+    <button type="button" data-filter="data" aria-pressed="true">With EEG data</button>
+    <button type="button" data-filter="all" aria-pressed="false">All {{ n_total }} trials</button>
+  </div>
+
+  <div class="sheet">
+    <table>
+      <thead>
+        <tr><th>Trial</th><th>Subject</th><th>Recorded</th><th>Analysis</th><th class="bestcol">Best channel ({{ window }})</th><th>Electrodes</th><th></th></tr>
+      </thead>
+      <tbody>
+      {% for r in rows %}
+        <tr class="{% if not r.trial.edfFile %}nodata{% endif %}" data-has-data="{% if r.trial.edfFile %}1{% else %}0{% endif %}">
+          <td class="id"><a href="{% url 'analysis' r.trial.pk %}">#{{ r.trial.pk }}</a></td>
+          <td data-label="Subject">{{ r.trial.subject }}</td>
+          <td class="when" data-label="Recorded">{{ r.trial.trialTimestamp|default:"—" }}</td>
+          <td class="status"><span class="badge {{ r.cls }}">{{ r.label }}</span></td>
+          <td class="best{% if r.best.sig %} sig{% endif %}" data-label="Best">
+            {% if r.best %}{{ r.best.channel }} {{ r.best.uv }} µV, p={{ r.best.p }}{% if r.best.peak %}<small>largest difference at {{ r.best.peak }} ms</small>{% endif %}{% else %}—{% endif %}
+          </td>
+          <td data-label="Electrodes">{{ r.channels|default:"—" }}</td>
+          <td class="links">
+            {% if r.trial.periStimulusAverage %}<a href="{% url 'analysis' r.trial.pk %}">Results</a>{% endif %}
+            {% if r.trial.analysisReport %}<a href="{{ r.trial.analysisReport.url }}">PDF</a>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="note">Bold results have p &lt; 0.05 on their best channel. The p-values are not corrected for testing several channels per trial, so treat single values near 0.05 with caution.</p>
+</main>
+<script>
+  (function () {
+    var buttons = document.querySelectorAll('.filters button');
+    var rows = document.querySelectorAll('tbody tr');
+    function apply(mode) {
+      rows.forEach(function (r) { r.hidden = mode === 'data' && r.dataset.hasData !== '1'; });
+      buttons.forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.filter === mode)); });
+    }
+    buttons.forEach(function (b) { b.addEventListener('click', function () { apply(b.dataset.filter); }); });
+    apply('data');
+  })();
+</script>
+</body>
 </html>

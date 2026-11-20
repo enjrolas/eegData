@@ -1,14 +1,45 @@
-<html>
-  <body>
-    <div>
-      {{ trial }}
-    </div>
-    <div>
-      <div><img src="{{ trial.periStimulusAverage.url }}"></div>
-      <div><img src="{{ trial.filteredPeriStimulusAverage.url }}"></div>
-      <div><img src="{{ trial.filteredPeriPromptStimulusAverage.url }}"></div>      
-      <div><img src="{{ trial.periNonStimulusAverage.url }}"></div>
-    </div>
-      
-  </body>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trial #{{ trial.pk }} analysis · EEG Data</title>
+  <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    :root { --paper:#EEF2F4; --ink:#1D2A33; --muted:#5C6B75; --trace:#2F5BEA; --line:#D5DEE3; --sheet:#fff; }
+    @media (prefers-color-scheme: dark) { :root { --paper:#121A20; --ink:#E3EAEE; --muted:#93A3AD; --trace:#7B9BFF; --line:#2A3944; --sheet:#18232B; } }
+    body { margin:0; background:var(--paper); color:var(--ink); font:16px/1.5 "Atkinson Hyperlegible", system-ui, sans-serif; }
+    main { max-width:1200px; margin:0 auto; padding:28px 16px 60px; }
+    h1 { margin:0 0 4px; font-size:1.9rem; line-height:1.15; }
+    .meta { color:var(--muted); margin:0 0 18px; }
+    .actions a { display:inline-block; margin:0 14px 18px 0; color:var(--trace); font-weight:700; }
+    figure { margin:0 0 22px; background:var(--sheet); border:1px solid var(--line); border-radius:10px; padding:14px; }
+    figcaption { font-weight:700; margin-bottom:8px; }
+    img { max-width:100%; height:auto; display:block; background:#fff; }
+    .empty { color:var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Trial #{{ trial.pk }}</h1>
+  <p class="meta">Subject {{ trial.subject }} · recorded {{ trial.trialTimestamp }}{% if trial.analysisError %} · analysis failed{% endif %}</p>
+  <div class="actions">
+    {% if trial.analysisReport %}<a href="{{ trial.analysisReport.url }}">Download PDF report</a>{% endif %}
+    <a href="{% url 'analyses' %}">All trials</a>
+  </div>
+  {% if trial.periStimulusAverage %}
+  <figure><figcaption>Event-related potentials: clear vs scrambled</figcaption><img src="{{ trial.periStimulusAverage.url }}" alt="ERPs"></figure>
+  {% endif %}
+  {% if trial.filteredPeriStimulusAverage %}
+  <figure><figcaption>Difference wave (clear − scrambled)</figcaption><img src="{{ trial.filteredPeriStimulusAverage.url }}" alt="Difference wave"></figure>
+  {% endif %}
+  {% if trial.filteredPeriPromptStimulusAverage %}
+  <figure><figcaption>Keypress-locked average</figcaption><img src="{{ trial.filteredPeriPromptStimulusAverage.url }}" alt="Keypress-locked average"></figure>
+  {% endif %}
+  {% if trial.periNonStimulusAverage %}
+  <figure><figcaption>Alignment check and signal overview</figcaption><img src="{{ trial.periNonStimulusAverage.url }}" alt="Alignment check"></figure>
+  {% endif %}
+  {% if not trial.periStimulusAverage %}<p class="empty">This trial has not been analysed yet.</p>{% endif %}
+</main>
+</body>
 </html>
