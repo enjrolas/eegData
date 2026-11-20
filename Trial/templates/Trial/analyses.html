@@ -41,6 +41,16 @@
     .filters button[aria-pressed="true"] { border-color: var(--trace); color: var(--trace); font-weight: 700;
                                            background: color-mix(in srgb, var(--trace) 10%, var(--sheet)); }
 
+    .sortby { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: .95rem; }
+    .sortby select { font: inherit; color: var(--ink); background: var(--sheet); border: 1.5px solid var(--line);
+                     border-radius: 8px; padding: 6px 10px; min-height: 40px; }
+    th button.sort { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer;
+                     display: inline-flex; align-items: center; gap: 4px; }
+    th button.sort::after { content: "↕"; opacity: .35; font-size: .8em; }
+    th[aria-sort="ascending"] button.sort, th[aria-sort="descending"] button.sort { color: var(--trace); }
+    th[aria-sort="ascending"] button.sort::after { content: "▲"; opacity: 1; }
+    th[aria-sort="descending"] button.sort::after { content: "▼"; opacity: 1; }
+    th button.sort:hover { color: var(--trace); }
     .sheet { background: var(--sheet); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
@@ -103,6 +113,18 @@
   <div class="filters" role="group" aria-label="Show trials">
     <button type="button" data-filter="data" aria-pressed="true">With EEG data</button>
     <button type="button" data-filter="all" aria-pressed="false">All {{ n_total }} trials</button>
+    <label class="sortby">Sort by
+      <select id="sortby">
+        <option value="when:desc">Date, newest first</option>
+        <option value="when:asc">Date, oldest first</option>
+        <option value="id:desc">Trial #, highest first</option>
+        <option value="id:asc">Trial #, lowest first</option>
+        <option value="subject:asc">Subject, A–Z</option>
+        <option value="subject:desc">Subject, Z–A</option>
+        <option value="rp:asc">RP latency, shortest first</option>
+        <option value="rp:desc">RP latency, longest first</option>
+      </select>
+    </label>
   </div>
 
   <div class="tagbar" aria-label="Filter by tag">
@@ -113,11 +135,11 @@
   <div class="sheet">
     <table>
       <thead>
-        <tr><th>Trial</th><th>Subject</th><th>Recorded</th><th>Analysis</th><th class="latcol">RP latency</th><th class="bestcol">Best channel ({{ window }})</th><th>Electrodes</th><th>Tags</th><th></th></tr>
+        <tr><th aria-sort="none"><button type="button" class="sort" data-key="id">Trial</button></th><th aria-sort="none"><button type="button" class="sort" data-key="subject">Subject</button></th><th aria-sort="descending"><button type="button" class="sort" data-key="when">Recorded</button></th><th>Analysis</th><th class="latcol" aria-sort="none"><button type="button" class="sort" data-key="rp">RP latency</button></th><th class="bestcol">Best channel ({{ window }})</th><th>Electrodes</th><th>Tags</th><th></th></tr>
       </thead>
       <tbody>
       {% for r in rows %}
-        <tr class="{% if not r.trial.edfFile %}nodata{% endif %}" data-has-data="{% if r.trial.edfFile %}1{% else %}0{% endif %}">
+        <tr class="{% if not r.trial.edfFile %}nodata{% endif %}" data-has-data="{% if r.trial.edfFile %}1{% else %}0{% endif %}" data-id="{{ r.trial.pk }}" data-subject="{{ r.trial.subject }}" data-when="{{ r.when }}" data-rp="{{ r.trial.rpLatencyMs|default_if_none:'' }}">
           <td class="id"><a href="{% url 'analysis' r.trial.pk %}">#{{ r.trial.pk }}</a></td>
           <td data-label="Subject">{{ r.trial.subject }}</td>
           <td class="when" data-label="Recorded">{{ r.trial.trialTimestamp|default:"—" }}</td>
@@ -149,6 +171,48 @@
     }
     buttons.forEach(function (b) { b.addEventListener('click', function () { apply(b.dataset.filter); }); });
     apply({% if tag %}'all'{% else %}'data'{% endif %});
+
+    // --- sorting: column headers and the "Sort by" menu stay in step ---
+    var tbody = document.querySelector('tbody');
+    var select = document.getElementById('sortby');
+    var heads = document.querySelectorAll('th button.sort');
+    var firstDir = { id: 'desc', when: 'desc', subject: 'asc', rp: 'asc' };
+    var state = { key: 'when', dir: 'desc' };
+    function value(r, key) {
+      var v = r.dataset[key] || '';
+      if (key === 'id' || key === 'rp') return v === '' ? null : parseFloat(v);
+      return v === '' ? null : v.toLowerCase();
+    }
+    function sort(key, dir) {
+      state = { key: key, dir: dir };
+      var list = Array.prototype.slice.call(tbody.rows);
+      list.sort(function (a, b) {
+        var x = value(a, key), y = value(b, key);
+        if (x === null && y === null) return value(b, 'id') - value(a, 'id');
+        if (x === null) return 1;            // blanks always last
+        if (y === null) return -1;
+        var c = x < y ? -1 : x > y ? 1 : 0;
+        if (c === 0) return value(b, 'id') - value(a, 'id');
+        return dir === 'asc' ? c : -c;
+      });
+      list.forEach(function (r) { tbody.appendChild(r); });
+      heads.forEach(function (h) {
+        h.parentNode.setAttribute('aria-sort', h.dataset.key === key ? (dir === 'asc' ? 'ascending' : 'descending') : 'none');
+      });
+      select.value = key + ':' + dir;
+      try { localStorage.setItem('analyses-sort', key + ':' + dir); } catch (e) {}
+    }
+    heads.forEach(function (h) {
+      h.addEventListener('click', function () {
+        var k = h.dataset.key;
+        sort(k, state.key === k ? (state.dir === 'asc' ? 'desc' : 'asc') : firstDir[k]);
+      });
+    });
+    select.addEventListener('change', function () { var p = select.value.split(':'); sort(p[0], p[1]); });
+    var saved = null;
+    try { saved = localStorage.getItem('analyses-sort'); } catch (e) {}
+    if (saved && select.querySelector('option[value="' + saved + '"]')) { var p = saved.split(':'); sort(p[0], p[1]); }
+    else sort('when', 'desc');
   })();
 </script>
 </body>

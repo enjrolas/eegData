@@ -97,6 +97,16 @@ def trialData(request, id):
   jsonData=json.loads(data)
   return JsonResponse(jsonData[0], safe=False)
 
+def recorded_key(trial):
+  """Sortable 'YYYYmmddHHMMSS.fff' from trialTimestamp ("M/D/YYYY H:M[:S[.f]]");
+  falls back to the record's creation time."""
+  import re
+  m=re.match(r"\s*(\d+)/(\d+)/(\d{4})\s+(\d+):(\d+)(?::(\d+)(?:\.(\d+))?)?", trial.trialTimestamp or "")
+  if m:
+    mo, d, y, h, mi, sec, frac = m.groups()
+    return "%s%02d%02d%02d%02d%02d.%s" % (y, int(mo), int(d), int(h), int(mi), int(sec or 0), (frac or "0").ljust(3, "0"))
+  return trial.timestamp.strftime("%Y%m%d%H%M%S.000") if trial.timestamp else ""
+
 def analyses(request):
   from Analysis.summary import load_summary, status_of
   from Analysis.labels import WINDOW_TEXT
@@ -120,6 +130,7 @@ def analyses(request):
            "pm": "%.0f" % ((trial.rpLatencyCiHighMs - trial.rpLatencyCiLowMs) / 2)}
     tags=[t for t in trial.tags.all() if t.slug != "no-data-file"]
     rows.append({"trial": trial, "cls": cls, "label": label, "best": best, "lat": lat,
+                 "when": recorded_key(trial),
                  "tags": [t for t in tags if t.category != "channel"],
                  "chtags": [t for t in tags if t.category == "channel"],
                  "channels": ", ".join(summary.get("channels", [])) if summary else ""})
