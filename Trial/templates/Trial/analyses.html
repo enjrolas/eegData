@@ -71,7 +71,11 @@
     .tag:hover { background: color-mix(in srgb, var(--trace) 10%, transparent); }
     .tag.sync { border-color: var(--warn); } .tag.data { border-color: var(--bad); }
     .tag.result { border-color: var(--good); } .tag.trial { border-color: var(--trace); }
-    .tagbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 12px; }
+    .tagpanel { background: var(--sheet); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; margin: 0 0 20px; }
+    .tagpanel h2 { font-size: 1rem; margin: 0 0 10px; }
+    .tagpanel .tag { padding: 4px 10px; font-size: .85rem; }
+    .tagnow { margin: 10px 0 0; color: var(--muted); }
+    .tagbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
     .tagbar .tag.on { background: color-mix(in srgb, var(--trace) 14%, var(--sheet)); font-weight: 700; }
     .lat b { font-size: 1.05rem; white-space: nowrap; }
     .lat small { color: var(--muted); display: block; font-size: .8rem; white-space: nowrap; }
@@ -102,7 +106,15 @@
     <a class="new" href="{% url 'home' %}">Set up a new trial</a>
   </header>
 
-  <p class="keyline"><b>RP latency</b> is the key number: the median time from an image appearing on screen to the recognition-potential peak, measured on each clear image on the trial's best channel. ± is half the 95% confidence interval of the median.</p>
+  <section class="tagpanel" aria-labelledby="tagpanel-title">
+    <h2 id="tagpanel-title">Select a tag to filter the trials</h2>
+    <div class="tagbar">
+      {% for t in all_tags %}<a class="tag {{ t.category }}{% if tag.slug == t.slug %} on{% endif %}" href="?tag={{ t.slug }}" title="{{ t.description }}"{% if tag.slug == t.slug %} aria-current="true"{% endif %}>{{ t.name }}</a>{% endfor %}
+    </div>
+    {% if tag %}<p class="tagnow">Showing trials tagged <b>{{ tag.name }}</b> — <a href="?">show all trials</a></p>{% endif %}
+  </section>
+
+  <p class="keyline"><b>RP latency</b> is the key number: the time from an image appearing on screen to the recognition-potential peak, measured on the clear − scrambled average on the trial's best channel. ± is half its bootstrap 95% confidence interval.</p>
 
   <ul class="counts">
     <li><b>{{ n_data }}</b>trials with EEG data</li>
@@ -125,11 +137,6 @@
         <option value="rp:desc">RP latency, longest first</option>
       </select>
     </label>
-  </div>
-
-  <div class="tagbar" aria-label="Filter by tag">
-    {% for t in all_tags %}<a class="tag {{ t.category }}{% if tag.slug == t.slug %} on{% endif %}" href="?tag={{ t.slug }}" title="{{ t.description }}">{{ t.name }}</a>{% endfor %}
-    {% if tag %}<a href="?">Show all trials</a>{% endif %}
   </div>
 
   <div class="sheet">
